@@ -279,6 +279,7 @@ function newTab(path) {
     searchTerm: "",
     searchHits: [],
     searchIdx: -1,
+    hlIdx: null,
     jumpLine: null,
   };
 }
@@ -460,8 +461,10 @@ async function loadFileContent(tab, { tail = false, offset = 0, limit = null, sc
   }));
   tab.selected.clear();
   tab.lastClicked = null;
+  tab.hlIdx = null;  // a pagina mudou: a navegacao de destaques recomeca
   recomputeSearch(tab);
   renderPanels();
+  renderHighlightList();
   setStatus(`${tab.path.split("/").pop()}: linhas ${fmtNum(tab.offset + 1)}-` +
     `${fmtNum(tab.offset + tab.lines.length)} de ${fmtNum(tab.totalLines)}` +
     (tab.format ? ` | formato ${tab.format}` : ""));
@@ -612,15 +615,55 @@ function recomputeSearch(tab) {
 // Render dos paineis de log
 // ---------------------------------------------------------------------------
 
-function highlightHtml(text, term) {
-  if (!term) return escapeHtml(text);
-  let re;
+/** Regex global e tolerante: um padrao invalido vira busca literal. */
+function globalRegex(pattern, caseSensitive) {
+  const flags = caseSensitive ? "g" : "gi";
   try {
-    re = new RegExp(term, "gi");
+    return new RegExp(pattern, flags);
   } catch {
-    re = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+    return new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), flags);
   }
-  return escapeHtml(text).replace(re, (m) => `<mark>${m}</mark>`);
+}
+
+const MAX_MARKS_PER_LINE = 200;
+
+function collectRanges(text, re, cls, out) {
+  re.lastIndex = 0;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    if (m[0].length === 0) { re.lastIndex++; continue; }  // evita laco infinito
+    out.push({ start: m.index, end: m.index + m[0].length, cls });
+    if (out.length >= MAX_MARKS_PER_LINE) break;
+  }
+}
+
+/** Escapa o texto e envolve em <mark> tudo que casa com a busca ativa e com os
+ *  destaques ligados. Quando duas marcacoes se sobrepoem, a primeira vence. */
+function decorateText(text, tab) {
+  if (!text) return "";
+  if (!tab.searchTerm && !state.highlights.some((h) => h.enabled && h.pattern)) {
+    return escapeHtml(text);  // caminho rapido: nada a marcar
+  }
+  const ranges = [];
+  if (tab.searchTerm) {
+    collectRanges(text, globalRegex(tab.searchTerm, false), "hit", ranges);
+  }
+  for (const hl of state.highlights) {
+    if (!hl.enabled || !hl.pattern) continue;
+    collectRanges(text, globalRegex(hl.pattern, hl.caseSensitive), "hl-" + hl.color, ranges);
+  }
+  if (!ranges.length) return escapeHtml(text);
+
+  ranges.sort((a, b) => a.start - b.start || b.end - a.end);
+  let html = "";
+  let pos = 0;
+  for (const r of ranges) {
+    if (r.start < pos) continue;
+    html += escapeHtml(text.slice(pos, r.start));
+    html += `<mark class="${r.cls}">${escapeHtml(text.slice(r.start, r.end))}</mark>`;
+    pos = r.end;
+  }
+  return html + escapeHtml(text.slice(pos));
 }
 
 function isHighlighted(tab, line) {
@@ -636,7 +679,6 @@ function rowHtml(tab, line) {
   if (isHighlighted(tab, line)) classes.push("highlighted");
   if (tab.bookmarks.has(line.n)) classes.push("bookmarked");
 
-  const term = tab.searchTerm;
   if (!c) {
     // Linha fora do formato logcat (cabecalho de bugreport, dumpsys, etc):
     // mostra o texto cru ocupando as colunas de conteudo.
@@ -644,17 +686,19 @@ function rowHtml(tab, line) {
       `<td class="c-n">${line.n}</td>` +
       `<td class="c-lvl"></td><td class="c-time"></td><td class="c-pid"></td>` +
       `<td class="c-tid"></td><td class="c-tag"></td>` +
-      `<td class="c-text c-raw">${highlightHtml(line.text, term)}</td></tr>`;
+      `<td class="c-text c-raw">${decorateText(line.text, tab)}</td></tr>`;
   }
+  // Os destaques valem para qualquer coluna textual: quem destaca uma TAG ou um
+  // PID espera ver a marcacao onde o valor aparece, nao so na mensagem.
   return `<tr class="${classes.join(" ")}" data-line="${line.n}"` +
     ` data-tag="${escapeHtml(c.tag || "")}" data-pid="${escapeHtml(c.pid || "")}">` +
     `<td class="c-n">${line.n}</td>` +
     `<td class="c-lvl">${escapeHtml(c.level || "")}</td>` +
-    `<td class="c-time">${escapeHtml(c.time || "")}</td>` +
-    `<td class="c-pid">${escapeHtml(c.pid || "")}</td>` +
-    `<td class="c-tid">${escapeHtml(c.tid || "")}</td>` +
-    `<td class="c-tag">${escapeHtml(c.tag || "")}</td>` +
-    `<td class="c-text">${highlightHtml(c.msg ?? line.text, term)}</td></tr>`;
+    `<td class="c-time">${decorateText(c.time || "", tab)}</td>` +
+    `<td class="c-pid">${decorateText(c.pid || "", tab)}</td>` +
+    `<td class="c-tid">${decorateText(c.tid || "", tab)}</td>` +
+    `<td class="c-tag">${decorateText(c.tag || "", tab)}</td>` +
+    `<td class="c-text">${decorateText(c.msg ?? line.text, tab)}</td></tr>`;
 }
 
 function renderPanels() {
@@ -728,7 +772,9 @@ function buildPanel(tab, paneIndex) {
     <button data-act="find" title="Buscar e destacar nesta pagina (Ctrl+F)">&#128269;</button>
     <button data-act="prevhit" title="Ocorrencia anterior (Ctrl+,)">&#8963;</button>
     <button data-act="nexthit" title="Proxima ocorrencia (Ctrl+.)">&#8964;</button>
-    <button data-act="wrap" class="${tab.wrapText ? "on-toggle" : ""}" title="Quebrar linhas longas em vez de rolar na horizontal">&#8617;</button>
+    <label class="toolbar-check" title="Quebrar linhas longas no espaco horizontal disponivel, em vez de rolar na horizontal">
+      <input type="checkbox" data-act="wrap"${tab.wrapText ? " checked" : ""}> Quebrar linha
+    </label>
     <button data-act="export" title="Exportar as linhas visiveis (ou a selecao) para arquivo">Exportar</button>
     <button data-act="reset" title="Limpar todos os filtros e destaques">Limpar filtros</button>
     <span class="info"></span>
@@ -819,8 +865,8 @@ function wirePanel(tab, panel, toolbar, wrap, shown, paneIndex) {
   act("find").addEventListener("click", () => promptSearch(tab));
   act("prevhit").addEventListener("click", () => stepSearch(tab, -1));
   act("nexthit").addEventListener("click", () => stepSearch(tab, 1));
-  act("wrap").addEventListener("click", () => {
-    tab.wrapText = !tab.wrapText;
+  act("wrap").addEventListener("change", (e) => {
+    tab.wrapText = e.target.checked;
     refreshPanel(tab);
   });
   act("export").addEventListener("click", () => exportLines(tab, shown));
@@ -861,6 +907,8 @@ function wirePanel(tab, panel, toolbar, wrap, shown, paneIndex) {
     const tr = e.target.closest("tr[data-line]");
     if (!tr) return;
     e.preventDefault();
+    // Le a selecao de texto antes de qualquer redesenho, que a destruiria.
+    const picked = String(window.getSelection()).trim();
     const n = Number(tr.dataset.line);
     if (!tab.selected.has(n)) {
       tab.selected.clear();
@@ -868,7 +916,7 @@ function wirePanel(tab, panel, toolbar, wrap, shown, paneIndex) {
       tab.lastClicked = n;
       refreshPanel(tab);
     }
-    showContextMenu(e.clientX, e.clientY, tab);
+    showContextMenu(e.clientX, e.clientY, tab, picked);
   });
 }
 
@@ -984,13 +1032,16 @@ function selectedFieldValues(tab, field) {
   return values;
 }
 
-function showContextMenu(x, y, tab) {
+function showContextMenu(x, y, tab, picked) {
   const tags = selectedFieldValues(tab, "tag");
   const pids = selectedFieldValues(tab, "pid");
   const tagLabel = tags.size ? ` (${[...tags].slice(0, 2).join(", ")}${tags.size > 2 ? "..." : ""})` : "";
   const pidLabel = pids.size ? ` (${[...pids].slice(0, 3).join(", ")}${pids.size > 3 ? "..." : ""})` : "";
 
+  picked = picked || "";
   const items = [
+    { label: picked ? `Destacar "${picked.slice(0, 24)}${picked.length > 24 ? "..." : ""}"` : "Destacar texto selecionado",
+      disabled: !picked, act: () => addHighlight(picked, false) },
     { label: "Copiar linha(s)", act: () => copySelection(tab) },
     { label: "Exportar selecao...", act: () => exportLines(tab, []) },
     { label: "Marcar/desmarcar (bookmark)", act: () => toggleBookmarks(tab) },
@@ -1414,6 +1465,165 @@ filterDialog.addEventListener("click", (e) => {
 renderFilterList();
 
 // ---------------------------------------------------------------------------
+// Aba lateral: Destaques (varias palavras coloridas, com navegacao)
+// ---------------------------------------------------------------------------
+
+const HIGHLIGHTS_KEY = "logviewer.highlights";
+const HL_COLORS = 8;  // .hl-0 ... .hl-7 no CSS
+
+state.highlights = store(HIGHLIGHTS_KEY, []);
+state.activeHighlightId = null;
+
+const hlListEl = el("#hlList");
+let hlNewColor = 0;
+
+function saveHighlights() {
+  persist(HIGHLIGHTS_KEY, state.highlights);
+  renderHighlightList();
+  const tab = activeTab();
+  if (tab) refreshPanel(tab);
+}
+
+function renderSwatches() {
+  el("#hlSwatches").innerHTML = Array.from({ length: HL_COLORS }, (_, i) =>
+    `<button type="button" class="hl-swatch hl-${i}${i === hlNewColor ? " on" : ""}" ` +
+    `data-color="${i}" title="Cor ${i + 1}"></button>`).join("");
+  el("#hlSwatches").querySelectorAll(".hl-swatch").forEach((b) => {
+    b.addEventListener("click", () => {
+      hlNewColor = Number(b.dataset.color);
+      renderSwatches();
+    });
+  });
+}
+renderSwatches();
+
+/** Linhas visiveis da pagina que casam com o destaque. */
+function highlightHits(tab, hl) {
+  if (!tab || !hl.pattern) return [];
+  const re = globalRegex(hl.pattern, hl.caseSensitive);
+  const hits = [];
+  for (const line of visibleLines(tab)) {
+    re.lastIndex = 0;
+    if (re.test(line.text)) hits.push(line.n);
+  }
+  return hits;
+}
+
+function renderHighlightList() {
+  hlListEl.innerHTML = "";
+  if (!state.highlights.length) {
+    hlListEl.innerHTML = '<li class="hl-empty">Nenhum destaque ainda.</li>';
+    return;
+  }
+  const tab = activeTab();
+  for (const hl of state.highlights) {
+    const count = hl.enabled && tab ? highlightHits(tab, hl).length : 0;
+    const li = document.createElement("li");
+    li.className = "hl-item" + (state.activeHighlightId === hl.id ? " active" : "");
+    li.innerHTML =
+      `<input type="checkbox" class="hl-on"${hl.enabled ? " checked" : ""} title="Ligar/desligar">` +
+      `<span class="hl-chip hl-${hl.color}">${escapeHtml(hl.pattern)}</span>` +
+      `<span class="hl-count" title="Ocorrencias na pagina carregada">${hl.enabled && tab ? count : "-"}</span>` +
+      `<button class="hl-nav" data-dir="-1" title="Ocorrencia anterior (Shift+F3)">&#8963;</button>` +
+      `<button class="hl-nav" data-dir="1" title="Proxima ocorrencia (F3)">&#8964;</button>` +
+      `<button class="hl-del" title="Remover destaque">&times;</button>`;
+
+    li.querySelector(".hl-on").addEventListener("change", (e) => {
+      hl.enabled = e.target.checked;
+      saveHighlights();
+    });
+    li.querySelector(".hl-chip").addEventListener("click", () => stepHighlight(hl, 1));
+    li.querySelectorAll(".hl-nav").forEach((b) =>
+      b.addEventListener("click", () => stepHighlight(hl, Number(b.dataset.dir))));
+    li.querySelector(".hl-del").addEventListener("click", () => {
+      state.highlights = state.highlights.filter((h) => h.id !== hl.id);
+      if (state.activeHighlightId === hl.id) state.activeHighlightId = null;
+      saveHighlights();
+    });
+    hlListEl.appendChild(li);
+  }
+}
+
+/** Pula para a proxima (ou anterior) linha que contem o destaque. */
+function stepHighlight(hl, delta) {
+  const tab = activeTab();
+  if (!tab) {
+    setStatus("Abra um arquivo primeiro.", true);
+    return;
+  }
+  if (!hl.enabled) {
+    hl.enabled = true;
+    saveHighlights();
+  }
+  const hits = highlightHits(tab, hl);
+  if (!hits.length) {
+    setStatus(`"${hl.pattern}" nao aparece nesta pagina.`, true);
+    return;
+  }
+  // Trocar de destaque recomeca a navegacao a partir da linha selecionada.
+  if (state.activeHighlightId !== hl.id || tab.hlIdx == null) {
+    const from = tab.selected.size ? Math.min(...tab.selected) : tab.offset;
+    const forward = hits.findIndex((n) => n > from);
+    tab.hlIdx = delta > 0
+      ? (forward === -1 ? 0 : forward)
+      : (forward === -1 ? hits.length - 1 : Math.max(0, forward - 1));
+    state.activeHighlightId = hl.id;
+  } else {
+    tab.hlIdx = (tab.hlIdx + delta + hits.length) % hits.length;
+  }
+  const n = hits[tab.hlIdx];
+  tab.selected.clear();
+  tab.selected.add(n);
+  refreshPanel(tab);
+  scrollLogToLine(tab, n);
+  renderHighlightList();
+  setStatus(`"${hl.pattern}": ocorrencia ${tab.hlIdx + 1} de ${hits.length} (linha ${fmtNum(n)}).`);
+}
+
+function addHighlight(pattern, caseSensitive) {
+  pattern = (pattern || "").trim();
+  if (!pattern) return null;
+  const existing = state.highlights.find((h) => h.pattern === pattern);
+  if (existing) {
+    existing.enabled = true;
+    saveHighlights();
+    setStatus(`"${pattern}" ja estava na lista de destaques.`);
+    return existing;
+  }
+  const hl = {
+    id: "h" + Date.now() + Math.random().toString(36).slice(2, 6),
+    pattern,
+    color: hlNewColor,
+    enabled: true,
+    caseSensitive: !!caseSensitive,
+  };
+  state.highlights.push(hl);
+  hlNewColor = (hlNewColor + 1) % HL_COLORS;  // proxima cor por padrao
+  renderSwatches();
+  saveHighlights();
+  return hl;
+}
+
+el("#hlAddBtn").addEventListener("click", () => {
+  const input = el("#hlPattern");
+  if (addHighlight(input.value, el("#hlCase").checked)) input.value = "";
+});
+el("#hlPattern").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") el("#hlAddBtn").click();
+});
+el("#hlFromSelBtn").addEventListener("click", () => {
+  const text = String(window.getSelection()).trim();
+  if (!text) {
+    setStatus("Selecione um trecho de texto na tabela de log primeiro.", true);
+    return;
+  }
+  addHighlight(text, el("#hlCase").checked);
+  setStatus(`"${text}" destacado.`);
+});
+
+renderHighlightList();
+
+// ---------------------------------------------------------------------------
 // Atalhos globais
 // ---------------------------------------------------------------------------
 
@@ -1437,6 +1647,18 @@ document.addEventListener("keydown", (e) => {
     e.preventDefault();
     const tab = activeTab();
     if (tab) promptSearch(tab);
+    return;
+  }
+  if (e.key === "F3") {
+    e.preventDefault();
+    const delta = e.shiftKey ? -1 : 1;
+    const hl = state.highlights.find((h) => h.id === state.activeHighlightId)
+      || state.highlights.find((h) => h.enabled);
+    if (hl) stepHighlight(hl, delta);
+    else {
+      const tab = activeTab();
+      if (tab) stepSearch(tab, delta);  // sem destaques, F3 navega a busca
+    }
     return;
   }
   if (mod && (e.key === "," || e.key === ".")) {

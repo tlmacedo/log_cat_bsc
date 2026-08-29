@@ -28,8 +28,9 @@
     <aside id="sidebar">
       <div class="side-tabs" role="tablist">
         <button class="side-tab active" data-side="files">Arquivos</button>
-        <button class="side-tab" data-side="device">Dispositivo</button>
+        <button class="side-tab" data-side="device">Aparelho</button>
         <button class="side-tab" data-side="filters">Filtros</button>
+        <button class="side-tab" data-side="highlights">Destaques</button>
       </div>
 
       <section class="side-pane active" data-pane="files">
@@ -65,6 +66,20 @@
         <ul id="filterList" class="filter-list"></ul>
         <p class="side-hint">Filtros salvos combinam nivel, TAG, PID, TID e texto. Marque
         <em>negar</em> para excluir as linhas que casarem, no estilo <em>is not</em>.</p>
+      </section>
+
+      <section class="side-pane" data-pane="highlights">
+        <div class="side-toolbar hl-add">
+          <input id="hlPattern" placeholder="Palavra ou regex para destacar">
+          <div id="hlSwatches" class="hl-swatches"></div>
+          <label class="hl-check"><input type="checkbox" id="hlCase"> Aa</label>
+          <button id="hlAddBtn" class="primary">Destacar</button>
+          <button id="hlFromSelBtn" title="Destacar o texto selecionado na tabela de log">Do texto selecionado</button>
+        </div>
+        <ul id="hlList" class="hl-list"></ul>
+        <p class="side-hint">Clique num destaque para pular para a proxima ocorrencia.
+        <strong>F3</strong> avanca e <strong>Shift+F3</strong> volta no destaque ativo.
+        As ocorrencias contadas sao as da pagina carregada.</p>
       </section>
     </aside>
 

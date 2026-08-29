@@ -137,10 +137,12 @@ button.on-toggle { background: var(--accent); color: var(--accent-fg); border-co
 .side-tabs { display: flex; border-bottom: 1px solid var(--border); flex: 0 0 auto; }
 .side-tab {
   flex: 1;
+  min-width: 0;
   border: none;
   border-radius: 0;
   background: var(--bg-alt);
-  padding: 6px 4px;
+  padding: 6px 2px;
+  font-size: 11px;
   border-bottom: 2px solid transparent;
   color: var(--fg-dim);
 }
@@ -372,7 +374,68 @@ tr.lvl-F td.c-lvl, tr.lvl-F td.c-tag, tr.lvl-F td.c-text { color: var(--lvl-F); 
 tr.lvl-A td.c-lvl, tr.lvl-A td.c-tag, tr.lvl-A td.c-text { color: var(--lvl-A); }
 
 mark { background: var(--search-hit); color: inherit; padding: 0 1px; border-radius: 2px; }
-mark.current { outline: 1px solid var(--lvl-E); }
+mark.hit { outline: 1px dotted var(--fg-dim); }
+
+/* Paleta dos destaques de palavra. As cores tem o texto fixado em preto porque
+   os fundos sao claros nos dois temas — e assim o destaque continua legivel
+   sobre linhas de qualquer nivel. */
+mark.hl-0, .hl-chip.hl-0, .hl-swatch.hl-0 { background: #ffe066; color: #1a1a1a; }
+mark.hl-1, .hl-chip.hl-1, .hl-swatch.hl-1 { background: #8ce99a; color: #1a1a1a; }
+mark.hl-2, .hl-chip.hl-2, .hl-swatch.hl-2 { background: #74c0fc; color: #1a1a1a; }
+mark.hl-3, .hl-chip.hl-3, .hl-swatch.hl-3 { background: #ffa8a8; color: #1a1a1a; }
+mark.hl-4, .hl-chip.hl-4, .hl-swatch.hl-4 { background: #d0bfff; color: #1a1a1a; }
+mark.hl-5, .hl-chip.hl-5, .hl-swatch.hl-5 { background: #ffc9a0; color: #1a1a1a; }
+mark.hl-6, .hl-chip.hl-6, .hl-swatch.hl-6 { background: #99e9f2; color: #1a1a1a; }
+mark.hl-7, .hl-chip.hl-7, .hl-swatch.hl-7 { background: #fcc2d7; color: #1a1a1a; }
+
+/* ---- Aba Destaques ---- */
+.hl-add { flex-direction: column; align-items: stretch; }
+.hl-add > input { width: 100%; }
+.hl-add > button { width: 100%; }
+.hl-swatches { display: flex; gap: 4px; }
+.hl-swatch {
+  width: 20px; height: 20px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0;
+}
+.hl-swatch.on { outline: 2px solid var(--accent); outline-offset: 1px; }
+.hl-check { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--fg-dim); }
+.hl-list { list-style: none; margin: 0; padding: 4px 6px; overflow: auto; flex: 1; }
+.hl-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 4px;
+  border-radius: 3px;
+}
+.hl-item:hover { background: var(--bg-hover); }
+.hl-item.active { outline: 1px solid var(--accent); }
+.hl-chip {
+  flex: 1;
+  min-width: 0;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.hl-count { font-size: 10px; color: var(--fg-dim); min-width: 24px; text-align: right; }
+.hl-nav, .hl-del { padding: 0 5px; font-size: 11px; line-height: 1.4; }
+.hl-empty { color: var(--fg-dim); font-size: 11px; padding: 6px; }
+
+/* Checkbox de opcao dentro da barra do painel (ex: quebrar linha). */
+.toolbar-check {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--fg-dim);
+  white-space: nowrap;
+}
 
 .line-pulse { animation: pulse 900ms ease-out; }
 @keyframes pulse {
