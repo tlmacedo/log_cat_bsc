@@ -2,9 +2,10 @@ import os
 
 from flask import Blueprint, jsonify, request
 
+from . import deviceinfo
 from .fsops import PathError, list_tree, resolve_within_root
 from .logline import scan_fields
-from .reader import detect_encoding, read_file
+from .reader import cached_format, detect_encoding, read_file
 from .search import RegexError, gather_folder_files, search_files
 
 api = Blueprint("api", __name__, url_prefix="/api")
@@ -41,6 +42,7 @@ def get_file():
     tail = request.args.get("tail", "false").lower() == "true"
     offset = request.args.get("offset", 0, type=int)
     limit = request.args.get("limit", 500, type=int)
+    parse = request.args.get("parse", "true").lower() != "false"
 
     try:
         full_path = resolve_within_root(root, rel_path)
@@ -51,7 +53,7 @@ def get_file():
         return jsonify({"error": f"'{rel_path}' e um diretorio, nao um arquivo."}), 400
 
     try:
-        result = read_file(full_path, offset=offset, limit=limit, tail=tail)
+        result = read_file(full_path, offset=offset, limit=limit, tail=tail, parse=parse)
     except OSError as e:
         return jsonify({"error": f"Erro lendo arquivo: {e}"}), 500
 
@@ -121,6 +123,57 @@ def get_search():
     })
 
 
+@api.get("/device_info")
+def get_device_info():
+    """Extrai e classifica as informacoes de hardware e software presentes nos
+    arquivos do escopo, para alimentar a aba lateral 'Dispositivo'."""
+    root = request.args.get("root", "")
+    scope = request.args.get("scope", "explicit")
+    max_lines = request.args.get("max_lines", deviceinfo.DEFAULT_MAX_LINES, type=int)
+
+    try:
+        rel_paths, files_truncated = _resolve_scope_rel_paths(root, scope, request.args, 40)
+    except PathError as e:
+        return jsonify({"error": str(e)}), 400
+
+    if not rel_paths:
+        return jsonify({"error": "Nenhum arquivo no escopo informado."}), 400
+
+    entries = []
+    try:
+        for rel in rel_paths:
+            full_path = resolve_within_root(root, rel)
+            if os.path.isdir(full_path):
+                continue
+            try:
+                encoding = detect_encoding(full_path)
+                entries.append((rel, full_path, encoding, cached_format(full_path, encoding)))
+            except OSError:
+                continue
+    except PathError as e:
+        return jsonify({"error": str(e)}), 400
+
+    if not entries:
+        return jsonify({"error": "Nenhum arquivo legivel no escopo informado."}), 400
+
+    try:
+        if len(entries) == 1:
+            rel, full_path, encoding, log_format = entries[0]
+            report = deviceinfo.analyze(
+                full_path, encoding, max_lines=max_lines,
+                log_format=log_format, file_label=rel,
+            )
+            report["files_used"] = [rel]
+        else:
+            report = deviceinfo.analyze_many(entries, max_lines=max_lines)
+    except (OSError, UnicodeError) as e:
+        return jsonify({"error": f"Erro analisando arquivos: {e}"}), 500
+
+    report["files_truncated"] = files_truncated
+    report["scope"] = scope
+    return jsonify(report)
+
+
 @api.get("/log_fields")
 def get_log_fields():
     """Descobre valores reais de tag/pid/uid/level nos arquivos do escopo
@@ -137,7 +190,7 @@ def get_log_fields():
     if not rel_paths:
         return jsonify({"error": "Nenhum arquivo no escopo informado."}), 400
 
-    tag_totals, pid_totals, uid_totals = {}, {}, {}
+    tag_totals, pid_totals, uid_totals, tid_totals = {}, {}, {}, {}
     levels = set()
     lines_scanned = 0
     lines_parsed = 0
@@ -163,6 +216,8 @@ def get_log_fields():
                 pid_totals[p] = pid_totals.get(p, 0) + 1
             for u in r["uids"]:
                 uid_totals[u] = uid_totals.get(u, 0) + 1
+            for t in r["tids"]:
+                tid_totals[t] = tid_totals.get(t, 0) + 1
     except PathError as e:
         return jsonify({"error": str(e)}), 400
 
@@ -173,6 +228,7 @@ def get_log_fields():
         "lines_parsed": lines_parsed,
         "tags": sorted(tag_totals, key=lambda k: (-tag_totals[k], k))[:300],
         "pids": sorted(pid_totals, key=lambda k: (-pid_totals[k], int(k)))[:300],
+        "tids": sorted(tid_totals, key=lambda k: (-tid_totals[k], k))[:300],
         "uids": sorted(uid_totals, key=lambda k: (-uid_totals[k], k))[:300],
         "levels": sorted(levels),
     })
