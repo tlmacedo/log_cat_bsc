@@ -155,7 +155,7 @@ function openFile(path, jumpLine) {
       id: "t" + Date.now() + Math.random().toString(36).slice(2, 6),
       path,
       lines: [],
-      mode: "tail",
+      mode: "range",
       offset: 0,
       limit: 500,
       size: null,
@@ -168,7 +168,7 @@ function openFile(path, jumpLine) {
     if (jumpLine) {
       jumpToLine(tab, jumpLine);
     } else {
-      loadFileContent(tab, { tail: true });
+      loadFileContent(tab, { offset: 0 });
     }
   } else if (jumpLine) {
     jumpToLine(tab, jumpLine);
