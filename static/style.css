@@ -664,10 +664,10 @@ mark.hl-7, .hl-chip.hl-7, .hl-swatch.hl-7, .fd-term.hl-7 { background: #fcc2d7; 
 .badge-E { background: #dc2626; }
 .badge-F, .badge-A { background: #7f1d1d; }
 
-/* ---- Janela de resultados da busca no arquivo inteiro ---- */
+/* ---- Janela de resultados: uma secao por busca, colapsavel ---- */
 .find-dock {
   flex: 0 0 auto;
-  height: 240px;
+  height: 260px;
   display: flex;
   flex-direction: column;
   min-height: 90px;
@@ -681,41 +681,62 @@ mark.hl-7, .hl-chip.hl-7, .hl-swatch.hl-7, .fd-term.hl-7 { background: #fcc2d7; 
   align-items: center;
   gap: 8px;
   padding: 4px 8px;
-  background: var(--bg-alt);
-  border-bottom: 1px solid var(--border-soft);
+  background: var(--bg-header);
+  border-bottom: 1px solid var(--border);
   font-size: 11.5px;
   flex: 0 0 auto;
-  flex-wrap: wrap;
 }
 .fd-head button { font-size: 11px; padding: 1px 7px; }
-.fd-err { color: var(--lvl-E); }
 .fd-spacer { flex: 1; }
-.fd-legend { display: flex; gap: 4px; flex-wrap: wrap; }
+.fd-sections { flex: 1; overflow: auto; }
+
+.fd-section { border-bottom: 1px solid var(--border-soft); }
+/* Colapsada, a secao mostra so as palavras e a contagem — o resumo pedido. */
+.fd-section.collapsed .fd-list { display: none; }
+.fd-sec-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  background: var(--bg-alt);
+  font-size: 11.5px;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  flex-wrap: wrap;
+}
+.fd-marked > .fd-sec-head { background: color-mix(in srgb, var(--accent) 12%, var(--bg-alt)); }
+.fd-toggle {
+  border: none;
+  background: none;
+  color: var(--fg-dim);
+  padding: 0 2px;
+  font-size: 12px;
+}
+.fd-chips { display: flex; gap: 4px; flex-wrap: wrap; }
 .fd-term {
   padding: 0 6px;
   border-radius: 3px;
   font-family: var(--mono);
   font-size: 10.5px;
 }
-.fd-list { flex: 1; overflow: auto; font-family: var(--mono); font-size: 11.5px; }
+.fd-term-plain { background: var(--bg-header); color: var(--fg-dim); }
+.fd-count { color: var(--fg-dim); font-size: 11px; white-space: nowrap; }
+.fd-err { color: var(--lvl-E); }
+.fd-check { display: flex; align-items: center; gap: 3px; font-size: 11px; color: var(--fg-dim); }
+.fd-page, .fd-close, .fd-clear { font-size: 11px; padding: 0 6px; }
+
+.fd-list { font-family: var(--mono); font-size: 11.5px; }
 .fd-row { display: flex; gap: 8px; padding: 1px 8px; cursor: pointer; white-space: pre; }
 .fd-row:hover { background: var(--bg-hover); }
 .fd-row.on { background: var(--row-selected); color: var(--row-selected-fg); }
 .fd-n { color: var(--fg-dim); min-width: 78px; text-align: right; user-select: none; }
-.fd-row.on .fd-n { color: inherit; }
+.fd-row.on .fd-n, .fd-row.on .fd-tag, .fd-row.on .fd-file { color: inherit; }
 .fd-tag { color: var(--accent); margin-right: 8px; }
-.fd-row.on .fd-tag { color: inherit; }
 .fd-txt { flex: 1; min-width: 0; }
-.fd-empty { padding: 12px; color: var(--fg-dim); font-family: system-ui, sans-serif; }
-
-/* Cabecalho da linha do tempo, com o botao de fechar. */
-.tl-head { display: flex; align-items: center; gap: 8px; padding-bottom: 3px; }
-.tl-close { padding: 0 6px; line-height: 1.3; }
-
-/* Caixa "ir para a linha". */
-.goto-line { width: 74px; font-size: 11px; text-align: right; }
-
-/* Nome do arquivo nos resultados, quando a busca cobre varios arquivos. */
+.fd-flag { margin-right: 6px; }
+.fd-out { color: var(--fg-dim); font-style: italic; }
+.fd-more, .fd-empty { padding: 6px 10px; color: var(--fg-dim); font-family: system-ui, sans-serif; font-size: 11px; }
 .fd-file {
   color: var(--accent);
   min-width: 150px;
@@ -725,4 +746,28 @@ mark.hl-7, .hl-chip.hl-7, .hl-swatch.hl-7, .fd-term.hl-7 { background: #fcc2d7; 
   white-space: nowrap;
   flex: 0 0 auto;
 }
-.fd-row.on .fd-file { color: inherit; }
+
+/* ---- Marca de nivel: pinta a linha em vez de esconder as outras ---- */
+tr.lvl-mark td.c-n, .fd-row.lvl-mark .fd-n { position: relative; }
+tr.lvl-mark, .fd-row.lvl-mark { box-shadow: inset 3px 0 0 var(--mark-color); }
+tr.lvl-mark td, .fd-row.lvl-mark { background: color-mix(in srgb, var(--mark-color) 13%, transparent); }
+tr.selected.lvl-mark td { background: var(--row-selected); }
+.mk-V { --mark-color: #6b7280; }
+.mk-D { --mark-color: #2563eb; }
+.mk-I { --mark-color: #16a34a; }
+.mk-W { --mark-color: #d97706; }
+.mk-E { --mark-color: #dc2626; }
+.mk-F, .mk-A { --mark-color: #7f1d1d; }
+
+/* Linha escolhida para exportar. */
+tr.is-marked td.c-n, .fd-row.is-marked .fd-n {
+  background: var(--row-bookmark);
+  font-weight: 700;
+}
+
+/* Cabecalho da linha do tempo, com o botao de fechar. */
+.tl-head { display: flex; align-items: center; gap: 8px; padding-bottom: 3px; }
+.tl-close { padding: 0 6px; line-height: 1.3; }
+
+/* Caixa "ir para a linha". */
+.goto-line { width: 74px; font-size: 11px; text-align: right; }

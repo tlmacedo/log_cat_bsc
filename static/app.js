@@ -7,7 +7,7 @@
  */
 
 const LEVELS = ["V", "D", "I", "W", "E", "F"];
-const PAGE_SIZES = [500, 2000, 5000, 10000, 20000];
+const PAGE_SIZES = [500, 2000, 5000, 10000, 20000, 50000];
 const DEFAULT_PAGE_SIZE = 2000;
 
 const state = {
@@ -294,15 +294,17 @@ function newTab(path) {
     openTraces: new Set(),
     // Linha do tempo: fechada ate ser pedida.
     timelineOpen: false,
-    // Janela de resultados da busca no arquivo inteiro.
+    // Janela de resultados: uma secao por busca feita.
     findOpen: false,
-    findLoading: false,
-    findResults: null,
-    findQuery: "",
-    findError: null,
+    findSections: [],
     findHeight: null,
     findScope: "current",
-    // Cores atribuidas a cada palavra do filtro.
+    colorCursor: 0,
+    // Linhas escolhidas para exportar, e o estado da secao que as mostra.
+    exportMarks: new Set(),
+    markedCollapsed: false,
+    markedExport: false,
+    // Cores atribuidas a cada palavra em uso.
     filterTerms: [],
   };
 }
@@ -474,8 +476,10 @@ async function loadFileContent(tab, { tail = false, offset = 0, limit = null, sc
   tab.format = data.format || null;
   tab.mode = data.mode || "range";
   tab.offset = data.offset || 0;
-  tab.limit = effectiveLimit;
   tab.hasMore = !!data.has_more;
+  // `tab.limit` e a escolha do usuario no seletor e so muda por la; um salto
+  // carrega uma janela maior sem baguncar o que o seletor mostra.
+  if (!limit) tab.limit = effectiveLimit;
   const cols = data.columns || [];
   tab.lines = data.lines.map((text, i) => ({
     n: tab.offset + i + 1,
@@ -505,9 +509,12 @@ async function loadFileContent(tab, { tail = false, offset = 0, limit = null, sc
 }
 
 async function jumpToLine(tab, lineNumber) {
-  const offset = Math.max(0, lineNumber - Math.floor(tab.limit / 2) - 1);
+  // A linha de destino fica no meio, com pelo menos JUMP_CONTEXT linhas de
+  // cada lado: quem vem de um resultado precisa do que veio antes e depois.
+  const span = Math.max(JUMP_CONTEXT * 2 + 1, tab.limit);
+  const offset = Math.max(0, lineNumber - 1 - Math.floor(span / 2));
   tab.jumpLine = lineNumber;
-  await loadFileContent(tab, { offset, scrollToLine: lineNumber });
+  await loadFileContent(tab, { offset, limit: span, scrollToLine: lineNumber });
 }
 
 function scrollLogToLine(tab, lineNumber, paneIndex) {
@@ -566,13 +573,16 @@ function parseLiveFilter(query, caseSensitive) {
   return terms;
 }
 
-/** Cada palavra buscada ganha uma cor propria, inclusive as alternativas de um
- *  "a|b|c". Assim da para ver, numa linha so, qual dos termos casou. */
-function filterTerms(tab) {
+const MAX_ACTIVE_TERMS = 24;
+
+/** Quebra uma busca nas palavras que a compoem, cada uma com sua cor.
+ *  `start` continua a numeracao de cores de onde a secao anterior parou, para
+ *  que buscas diferentes nao repitam cor. */
+function termsOf(query, start = 0) {
   const out = [];
-  let color = 0;
-  for (const term of parseLiveFilter(tab.liveFilter, false)) {
-    if (term.negate) continue;   // termo negado esconde linhas, nao marca nada
+  let color = start;
+  for (const term of parseLiveFilter(query, false)) {
+    if (term.negate) continue;   // termo negado nao pinta nada
     const src = term.re.source;
     // Um "a|b|c" simples vira uma cor por alternativa; com parenteses ou
     // colchetes o "|" pode ser interno ao regex, entao fica uma cor so.
@@ -582,6 +592,22 @@ function filterTerms(tab) {
       color++;
     }
   }
+  return out;
+}
+
+/** Todas as palavras que devem aparecer coloridas no log: as que estao sendo
+ *  digitadas mais as de cada secao de resultado ainda aberta. Assim a cor no
+ *  log e a mesma da etiqueta na janela de baixo. */
+function activeTerms(tab) {
+  const out = [];
+  const seen = new Set();
+  const push = (t) => {
+    if (seen.has(t.pattern) || out.length >= MAX_ACTIVE_TERMS) return;
+    seen.add(t.pattern);
+    out.push(t);
+  };
+  for (const section of tab.findSections || []) section.terms.forEach(push);
+  termsOf(tab.liveFilter, tab.colorCursor || 0).forEach(push);
   return out;
 }
 
@@ -620,8 +646,14 @@ function savedFilterMatches(filter, line) {
   return true;
 }
 
+/** Linhas que a tabela de log mostra.
+ *
+ *  A caixa de busca NAO entra aqui de proposito: ela so pinta as palavras no
+ *  log e alimenta as secoes da janela de resultados. O log continua sendo o
+ *  log. Os niveis tambem nao filtram — marcam (ver `levelMarked`). O que ainda
+ *  esconde linha e o que veio do menu de contexto (mostrar/esconder TAG e PID),
+ *  o filtro salvo e o intervalo de tempo, todos acoes explicitas de esconder. */
 function visibleLines(tab) {
-  const terms = parseLiveFilter(tab.liveFilter, false);
   const filter = state.savedFilters.find((f) => f.id === tab.activeFilterId) || null;
   const range = tab.timeRange;
   const out = [];
@@ -631,9 +663,6 @@ function visibleLines(tab) {
     if (range) {
       const v = timeValue(c && c.time);
       if (v === null || v < range.from || v > range.to) continue;
-    }
-    if (tab.levels.size) {
-      if (!c || !tab.levels.has(c.level)) continue;
     }
     if (tab.showTags.size && (!c || !tab.showTags.has(c.tag))) continue;
     if (c && tab.hideTags.has(c.tag)) continue;
@@ -645,16 +674,15 @@ function visibleLines(tab) {
       if (filter.negate ? hit : !hit) continue;
     }
 
-    let ok = true;
-    for (const term of terms) {
-      const hit = termMatches(term, line);
-      if (term.negate ? hit : !hit) { ok = false; break; }
-    }
-    if (!ok) continue;
-
     out.push(line);
   }
   return out;
+}
+
+/** Nivel ligado nos botoes V D I W E F: a linha ganha a cor daquele nivel, no
+ *  log e nas secoes de resultado. Nao esconde nada. */
+function levelMarked(tab, c) {
+  return !!(c && c.level && tab.levels.has(c.level));
 }
 
 function recomputeSearch(tab) {
@@ -783,6 +811,9 @@ function rowHtml(tab, line, groups) {
   if (tab.selected.has(line.n)) classes.push("selected");
   if (isHighlighted(tab, line)) classes.push("highlighted");
   if (tab.bookmarks.has(line.n)) classes.push("bookmarked");
+  // Os botoes de nivel pintam a linha em vez de esconder as outras.
+  if (levelMarked(tab, c)) classes.push("lvl-mark", "mk-" + c.level);
+  if (tab.exportMarks.has(line.n)) classes.push("is-marked");
 
   // Bloco de stack trace: a primeira linha vira cabecalho dobravel e as demais
   // ficam escondidas enquanto o bloco estiver fechado.
@@ -884,7 +915,7 @@ function buildPanel(tab, paneIndex) {
 
   // As cores dos termos sao recalculadas a cada render: o filtro pode ter
   // mudado, e a marcacao precisa acompanhar.
-  tab.filterTerms = filterTerms(tab);
+  tab.filterTerms = activeTerms(tab);
   const shown = tab.binary ? [] : visibleLines(tab);
 
   // --- barra de ferramentas -------------------------------------------------
@@ -909,7 +940,7 @@ function buildPanel(tab, paneIndex) {
     </select>
     <button data-act="filesearch" class="primary" title="Buscar (Enter)">Buscar</button>
     <div class="level-toggles">
-      ${LEVELS.map((l) => `<button class="level-toggle${tab.levels.has(l) ? " on" : ""}" data-level="${l}" title="Nivel ${l}">${l}</button>`).join("")}
+      ${LEVELS.map((l) => `<button class="level-toggle${tab.levels.has(l) ? " on" : ""}" data-level="${l}" title="Marcar as linhas de nivel ${l} com a cor do nivel">${l}</button>`).join("")}
     </div>
     <span class="toolbar-sep"></span>
     <button data-act="start" title="Ir para o inicio do arquivo">&#8676; Inicio</button>
@@ -944,20 +975,6 @@ function buildPanel(tab, paneIndex) {
     ` | ${fmtNum(tab.offset + 1)}-${fmtNum(tab.offset + tab.lines.length)} de ${fmtNum(tab.totalLines)}` +
     (tab.size != null ? ` | ${fmtSize(tab.size)}` : "") +
     (tab.searchHits.length ? ` | ${tab.searchHits.length} ocorrencia(s)` : "");
-
-  // Filtro sem resultado na pagina: o arquivo tem milhoes de linhas e a busca
-  // util quase sempre e a do arquivo inteiro, entao oferece o caminho.
-  if (!tab.binary && tab.lines.length && !shown.length && tab.liveFilter.trim() && !tab.findOpen) {
-    const hint = document.createElement("div");
-    hint.className = "range-bar";
-    hint.innerHTML = `<span>Nenhuma linha nesta pagina (${fmtNum(tab.offset + 1)}-` +
-      `${fmtNum(tab.offset + tab.lines.length)} de ${fmtNum(tab.totalLines)}). ` +
-      `O termo pode estar em outra parte do arquivo.</span>` +
-      `<button data-act="hint-search">Buscar no arquivo inteiro</button>`;
-    hint.querySelector("[data-act=hint-search]")
-      .addEventListener("click", () => searchWholeFile(tab, 0));
-    panel.appendChild(hint);
-  }
 
   // Barra de intervalo: aparece com duas ou mais linhas selecionadas.
   const rangeBar = buildRangeBar(tab);
@@ -1058,41 +1075,33 @@ function fmtDelta(ms) {
 // ---------------------------------------------------------------------------
 
 const FIND_PAGE = 500;
+const MAX_SECTIONS = 12;
 
-/** Monta os parametros de /api/filtered a partir do que esta na caixa de
- *  filtro. Termos sem prefixo viram `raw`: casam com a linha inteira, que e o
- *  que a maioria das linhas de um bugreport exige — elas nem sao logcat. */
-function fileSearchParams(tab) {
+// ---------------------------------------------------------------------------
+// Busca: cada pesquisa vira uma secao na janela de resultados
+// ---------------------------------------------------------------------------
+
+/** Monta os parametros de /api/filtered a partir de uma consulta. Termos sem
+ *  prefixo viram `raw`: casam com a linha inteira, que e o que a maioria das
+ *  linhas de um bugreport exige — elas nem sao logcat. */
+function fileSearchParams(tab, query) {
   const params = new URLSearchParams({ root: state.root, file: tab.path });
-  const terms = parseLiveFilter(tab.liveFilter, false);
   const bare = [];
   const byField = { tag: [], msg: [], pid: [], tid: [], uid: [] };
   let negated = 0;
-  for (const term of terms) {
+  for (const term of parseLiveFilter(query, false)) {
     if (term.negate) { negated++; continue; }
     if (!term.field) bare.push(term.re.source);
     else byField[term.field].push(term.re.source);
   }
   // Varios termos no mesmo campo sao E: a linha precisa conter todos.
-  const all = (arr) => arr.map((s) => `(?=.*(?:${s}))`).join("") + ".*";
+  const all = (arr) => arr.map((x) => `(?=.*(?:${x}))`).join("") + ".*";
   if (bare.length) params.set("raw", bare.length === 1 ? bare[0] : all(bare));
   if (byField.tag.length) params.set("tag", byField.tag.join("|"));
   if (byField.msg.length) params.set("text", byField.msg.join("|"));
   if (byField.pid.length) params.set("pid", byField.pid.join("|"));
   if (byField.tid.length) params.set("tid", byField.tid.join("|"));
   if (byField.uid.length) params.set("uid", byField.uid.join("|"));
-  if (tab.levels.size) params.set("levels", [...tab.levels].join(","));
-
-  const filter = state.savedFilters.find((f) => f.id === tab.activeFilterId);
-  if (filter) {
-    if (filter.tag) params.set("tag", filter.tag);
-    if (filter.text) params.set("text", filter.text);
-    if (filter.pid) params.set("pid", filter.pid);
-    if (filter.tid) params.set("tid", filter.tid);
-    if (filter.levels && filter.levels.length) params.set("levels", filter.levels.join(","));
-    if (filter.negate) params.set("negate", "true");
-    if (filter.caseSensitive) params.set("case", "true");
-  }
   return { params, hasCriteria: [...params.keys()].length > 2, negated };
 }
 
@@ -1113,8 +1122,8 @@ function focusSearchBox(scope) {
 }
 
 /** Busca com escopo em varios arquivos, reaproveitando /api/search. */
-async function searchAcrossFiles(tab, scope) {
-  const params = new URLSearchParams({ root: state.root, pattern: tab.liveFilter.trim() });
+async function searchAcrossFiles(tab, query, scope) {
+  const params = new URLSearchParams({ root: state.root, pattern: query });
   if (scope === "open") {
     params.set("scope", "open");
     params.set("open_files", state.tabs.map((t) => t.path).join(","));
@@ -1125,14 +1134,13 @@ async function searchAcrossFiles(tab, scope) {
   params.set("flags", "i");
   params.set("max_results", 2000);
   params.set("total_max_results", 5000);
-  if (tab.levels.size) params.set("levels", [...tab.levels].join(","));
 
   const res = await fetch(`/api/search?${params}`);
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || "Erro na busca.");
 
-  // Achata os resultados por arquivo numa lista unica, do mesmo formato que a
-  // busca de um arquivo so devolve — assim a janela de resultados e uma so.
+  // Achata os resultados por arquivo numa lista unica, do mesmo formato da
+  // busca de um arquivo so — assim a secao se desenha igual nos dois casos.
   const lines = [], numbers = [], columns = [], files = [];
   for (const fileResult of data.results) {
     for (const m of fileResult.matches || []) {
@@ -1152,45 +1160,61 @@ async function searchAcrossFiles(tab, scope) {
   };
 }
 
-/** Busca unica do app: procura no arquivo inteiro (ou nos arquivos do escopo)
- *  e abre a janela de resultados no rodape do painel. */
-async function searchWholeFile(tab, offset = 0) {
-  const scope = tab.findScope || "current";
-  const query = tab.liveFilter.trim();
-  if (!query && !tab.levels.size) {
+/** Roda a busca e guarda o resultado como mais uma secao da janela de baixo.
+ *  Buscar de novo o mesmo termo atualiza a secao existente em vez de duplicar. */
+async function runSearch(tab, query, { sectionId = null, offset = 0 } = {}) {
+  query = (query ?? tab.liveFilter).trim();
+  if (!query) {
     setStatus("Digite algo na caixa de busca.", true);
     return;
   }
+  const scope = tab.findScope || "current";
 
-  let params, hasCriteria, negated = 0;
-  if (scope === "current") {
-    ({ params, hasCriteria, negated } = fileSearchParams(tab));
-    if (!hasCriteria) {
-      setStatus("Digite algo na caixa de busca.", true);
-      return;
-    }
-    params.set("offset", offset);
-    params.set("limit", FIND_PAGE);
+  let section = sectionId
+    ? tab.findSections.find((x) => x.id === sectionId)
+    : tab.findSections.find((x) => x.query === query && x.scope === scope);
+
+  if (!section) {
+    section = {
+      id: "s" + Date.now() + Math.random().toString(36).slice(2, 5),
+      query,
+      scope,
+      terms: termsOf(query, tab.colorCursor || 0),
+      results: null,
+      collapsed: false,
+      exportChecked: false,
+      loading: true,
+      error: null,
+    };
+    tab.colorCursor = ((tab.colorCursor || 0) + section.terms.length) % HL_COLORS;
+    tab.findSections.unshift(section);
+    if (tab.findSections.length > MAX_SECTIONS) tab.findSections.length = MAX_SECTIONS;
+  } else {
+    section.loading = true;
+    section.error = null;
   }
 
   saveToHistory(query);
   tab.findOpen = true;
-  tab.findLoading = true;
-  tab.findQuery = query;
-  tab.findScopeUsed = scope;
   refreshPanel(tab);
 
   try {
     if (scope === "current") {
+      const { params, hasCriteria } = fileSearchParams(tab, query);
+      if (!hasCriteria) {
+        section.error = "Consulta vazia.";
+        return;
+      }
+      params.set("offset", offset);
+      params.set("limit", FIND_PAGE);
       const res = await fetch(`/api/filtered?${params}`);
       const data = await res.json();
       if (!res.ok) {
-        tab.findError = data.error || "Erro na busca.";
-        tab.findResults = null;
+        section.error = data.error || "Erro na busca.";
+        section.results = null;
         return;
       }
-      tab.findError = null;
-      tab.findResults = {
+      section.results = {
         lines: data.lines,
         numbers: data.line_numbers,
         columns: data.columns || [],
@@ -1199,118 +1223,227 @@ async function searchWholeFile(tab, offset = 0) {
         offset: data.offset,
         hasMore: data.has_more,
         truncated: data.truncated,
-        negated,
       };
-      setStatus(`${fmtNum(data.matched)} linha(s) encontradas no arquivo inteiro.`);
     } else {
-      tab.findResults = await searchAcrossFiles(tab, scope);
-      tab.findError = null;
-      setStatus(`${fmtNum(tab.findResults.matched)} ocorrencia(s) em ` +
-        `${tab.findResults.filesSearched} arquivo(s).`);
+      section.results = await searchAcrossFiles(tab, query, scope);
     }
+    section.error = null;
+    setStatus(`"${query}": ${fmtNum(section.results.matched)} linha(s).`);
   } catch (err) {
-    tab.findError = "Falha na requisicao: " + err.message;
-    tab.findResults = null;
+    section.error = "Falha na requisicao: " + err.message;
+    section.results = null;
   } finally {
-    tab.findLoading = false;
+    section.loading = false;
     refreshPanel(tab);
   }
 }
 
-/** Janela inferior com as linhas encontradas; clicar leva o log ate a linha. */
+/** Linhas que o usuario marcou para exportar, mais os bookmarks. */
+function markedRows(tab) {
+  const rows = [];
+  const byNumber = new Map(tab.lines.map((l) => [l.n, l]));
+  const numbers = new Set([...tab.exportMarks, ...tab.bookmarks]);
+  for (const n of [...numbers].sort((a, b) => a - b)) {
+    const line = byNumber.get(n);
+    rows.push({
+      n,
+      text: line ? line.text : null,   // null = linha fora da pagina carregada
+      c: line ? line.c : null,
+      marked: tab.exportMarks.has(n),
+      bookmarked: tab.bookmarks.has(n),
+    });
+  }
+  return rows;
+}
+
+// ---------------------------------------------------------------------------
+// Janela de resultados (fica no fluxo do painel, dividindo espaco com o log)
+// ---------------------------------------------------------------------------
+
+function chipsHtml(section) {
+  return section.terms.map((t) =>
+    `<span class="fd-term hl-${t.color}">${escapeHtml(t.pattern)}</span>`).join("");
+}
+
+function resultRowHtml(tab, section, i) {
+  const r = section.results;
+  const c = r.columns[i];
+  const text = r.lines[i];
+  const n = r.numbers[i];
+  const file = r.files ? r.files[i] : null;
+  const classes = ["fd-row"];
+  if (levelMarked(tab, c)) classes.push("lvl-mark", "mk-" + c.level);
+  if (tab.exportMarks.has(n) && !file) classes.push("is-marked");
+  const badge = c && c.level ? `<span class="badge badge-${c.level}">${c.level}</span>` : "";
+  const tag = c && c.tag ? `<span class="fd-tag">${escapeHtml(c.tag)}</span>` : "";
+  const fileCell = file
+    ? `<span class="fd-file" title="${escapeHtml(file)}">${escapeHtml(file.split("/").pop())}</span>`
+    : "";
+  return `<div class="${classes.join(" ")}" data-line="${n}"` +
+    `${file ? ` data-file="${escapeHtml(file)}"` : ""}>` +
+    `${fileCell}<span class="fd-n">${fmtNum(n)}</span>` +
+    `<span class="fd-txt">${badge}${tag}${decorateText(text, tab)}</span></div>`;
+}
+
+function buildSection(tab, section) {
+  const box = document.createElement("section");
+  box.className = "fd-section" + (section.collapsed ? " collapsed" : "");
+  box.dataset.sectionId = section.id;
+
+  const r = section.results;
+  const count = section.loading
+    ? "buscando..."
+    : section.error
+      ? section.error
+      : r
+        ? `${fmtNum(r.matched)}${r.truncated ? "+" : ""} linha(s)` +
+          (r.files ? ` em ${r.filesSearched} arquivo(s)` : "")
+        : "";
+
+  // O cabecalho e o resumo pedido: so as palavras coloridas e a contagem.
+  box.innerHTML =
+    `<header class="fd-sec-head">` +
+      `<button class="fd-toggle" title="Colapsar/expandir">${section.collapsed ? "▸" : "▾"}</button>` +
+      `<span class="fd-chips">${chipsHtml(section)}</span>` +
+      `<span class="fd-count${section.error ? " fd-err" : ""}">${escapeHtml(count)}</span>` +
+      `<span class="fd-spacer"></span>` +
+      `<label class="fd-check" title="Marcar esta secao para exportar">` +
+        `<input type="checkbox" class="fd-export"${section.exportChecked ? " checked" : ""}> exportar</label>` +
+      `<button class="fd-page" data-dir="-1" ${!r || r.files || r.offset === 0 ? "disabled" : ""} title="Resultados anteriores">&#8592;</button>` +
+      `<button class="fd-page" data-dir="1" ${!r || r.files || !r.hasMore ? "disabled" : ""} title="Proximos resultados">&#8594;</button>` +
+      `<button class="fd-close icon-btn" title="Remover esta busca">&times;</button>` +
+    `</header>` +
+    `<div class="fd-list"></div>`;
+
+  const list = box.querySelector(".fd-list");
+  if (r && r.lines.length) {
+    list.innerHTML = r.lines.map((_, i) => resultRowHtml(tab, section, i)).join("") +
+      (!r.files && r.matched > r.lines.length
+        ? `<div class="fd-more">mostrando ${fmtNum(r.offset + 1)}-` +
+          `${fmtNum(r.offset + r.lines.length)} de ${fmtNum(r.matched)}</div>`
+        : "");
+  } else if (r) {
+    list.innerHTML = '<div class="fd-empty">Nenhuma linha encontrada.</div>';
+  }
+
+  box.querySelector(".fd-toggle").addEventListener("click", () => {
+    section.collapsed = !section.collapsed;
+    refreshPanel(tab);
+  });
+  box.querySelector(".fd-close").addEventListener("click", () => {
+    tab.findSections = tab.findSections.filter((x) => x.id !== section.id);
+    refreshPanel(tab);
+  });
+  box.querySelector(".fd-export").addEventListener("change", (e) => {
+    section.exportChecked = e.target.checked;
+  });
+  box.querySelectorAll(".fd-page").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const delta = Number(btn.dataset.dir) * FIND_PAGE;
+      runSearch(tab, section.query, {
+        sectionId: section.id,
+        offset: Math.max(0, section.results.offset + delta),
+      });
+    });
+  });
+  list.addEventListener("click", (e) => {
+    const row = e.target.closest(".fd-row");
+    if (!row) return;
+    box.querySelectorAll(".fd-row.on").forEach((n) => n.classList.remove("on"));
+    row.classList.add("on");
+    openAtLine(tab, Number(row.dataset.line), row.dataset.file);
+  });
+  return box;
+}
+
+/** Secao fixa com o que foi marcado para exportar e com os bookmarks. */
+function buildMarkedSection(tab) {
+  const rows = markedRows(tab);
+  const box = document.createElement("section");
+  box.className = "fd-section fd-marked" + (tab.markedCollapsed ? " collapsed" : "");
+
+  box.innerHTML =
+    `<header class="fd-sec-head">` +
+      `<button class="fd-toggle" title="Colapsar/expandir">${tab.markedCollapsed ? "▸" : "▾"}</button>` +
+      `<span class="fd-chips"><span class="fd-term fd-term-plain">✓ marcadas para exportar</span>` +
+      `<span class="fd-term fd-term-plain">⚑ bookmarks</span></span>` +
+      `<span class="fd-count">${fmtNum(rows.length)} linha(s)</span>` +
+      `<span class="fd-spacer"></span>` +
+      `<label class="fd-check" title="Marcar esta secao para exportar">` +
+        `<input type="checkbox" class="fd-export"${tab.markedExport ? " checked" : ""}> exportar</label>` +
+      `<button class="fd-clear" title="Limpar as marcacoes">Limpar</button>` +
+    `</header>` +
+    `<div class="fd-list"></div>`;
+
+  const list = box.querySelector(".fd-list");
+  if (rows.length) {
+    list.innerHTML = rows.map((row) => {
+      const classes = ["fd-row"];
+      if (levelMarked(tab, row.c)) classes.push("lvl-mark", "mk-" + row.c.level);
+      const flags = (row.marked ? '<span class="fd-flag">✓</span>' : "") +
+        (row.bookmarked ? '<span class="fd-flag">⚑</span>' : "");
+      const body = row.text === null
+        ? '<span class="fd-out">(fora da pagina carregada — clique para ir ate ela)</span>'
+        : decorateText(row.c ? (row.c.msg ?? row.text) : row.text, tab);
+      return `<div class="${classes.join(" ")}" data-line="${row.n}">` +
+        `<span class="fd-n">${fmtNum(row.n)}</span>` +
+        `<span class="fd-txt">${flags}${body}</span></div>`;
+    }).join("");
+  } else {
+    list.innerHTML = '<div class="fd-empty">Nenhuma linha marcada. Use o menu de ' +
+      'contexto do log: "Marcar para exportar" ou "Marcar/desmarcar (bookmark)".</div>';
+  }
+
+  box.querySelector(".fd-toggle").addEventListener("click", () => {
+    tab.markedCollapsed = !tab.markedCollapsed;
+    refreshPanel(tab);
+  });
+  box.querySelector(".fd-export").addEventListener("change", (e) => {
+    tab.markedExport = e.target.checked;
+  });
+  box.querySelector(".fd-clear").addEventListener("click", () => {
+    if (!rows.length) return;
+    if (!window.confirm("Limpar as linhas marcadas e os bookmarks desta aba?")) return;
+    tab.exportMarks.clear();
+    tab.bookmarks.clear();
+    refreshPanel(tab);
+  });
+  list.addEventListener("click", (e) => {
+    const row = e.target.closest(".fd-row");
+    if (row) openAtLine(tab, Number(row.dataset.line), null);
+  });
+  return box;
+}
+
 function buildFindDock(tab) {
   if (!tab.findOpen) return null;
   const dock = document.createElement("div");
   dock.className = "find-dock";
 
-  const terms = tab.filterTerms || [];
-  const legend = terms.map((t) =>
-    `<span class="fd-term hl-${t.color}">${escapeHtml(t.pattern)}</span>`).join("");
-
-  const r = tab.findResults;
-  const head = tab.findLoading
-    ? "Buscando no arquivo inteiro..."
-    : tab.findError
-      ? tab.findError
-      : r
-        ? `${fmtNum(r.matched)} ${r.files ? "ocorrencia(s)" : "linha(s)"}` +
-          `${r.truncated ? "+" : ""} para "${escapeHtml(tab.findQuery)}"` +
-          (r.files ? ` em ${r.filesSearched} arquivo(s)` : "") +
-          (!r.files && r.matched > r.lines.length
-            ? ` | mostrando ${fmtNum(r.offset + 1)}-${fmtNum(r.offset + r.lines.length)}`
-            : "")
-        : "";
-
   dock.innerHTML =
     `<div class="fd-resize" title="Arraste para redimensionar"></div>` +
     `<div class="fd-head">` +
-      `<strong class="${tab.findError ? "fd-err" : ""}">${head}</strong>` +
-      `<span class="fd-legend">${legend}</span>` +
+      `<strong>Resultados</strong>` +
       `<span class="fd-spacer"></span>` +
-      `<button data-fd="prev" ${!r || r.files || r.offset === 0 ? "disabled" : ""} title="Resultados anteriores">&#8592;</button>` +
-      `<button data-fd="next" ${!r || r.files || !r.hasMore ? "disabled" : ""} title="Proximos resultados">&#8594;</button>` +
-      `<button data-fd="export" ${!r || r.files ? "disabled" : ""} title="Exportar todos os resultados">Exportar</button>` +
+      `<button data-fd="export" title="Exportar as secoes marcadas com 'exportar'">Exportar marcadas</button>` +
+      `<button data-fd="clear" title="Remover todas as buscas">Limpar buscas</button>` +
       `<button data-fd="close" class="icon-btn" title="Fechar a janela de resultados">&times;</button>` +
     `</div>` +
-    `<div class="fd-list"></div>`;
+    `<div class="fd-sections"></div>`;
 
-  const list = dock.querySelector(".fd-list");
-  if (r && r.lines.length) {
-    list.innerHTML = r.lines.map((text, i) => {
-      const c = r.columns[i];
-      const badge = c && c.level ? `<span class="badge badge-${c.level}">${c.level}</span>` : "";
-      const tag = c && c.tag ? `<span class="fd-tag">${escapeHtml(c.tag)}</span>` : "";
-      // Numa busca por varios arquivos, o nome do arquivo vem antes da linha.
-      const file = r.files ? r.files[i] : null;
-      const fileCell = file
-        ? `<span class="fd-file" title="${escapeHtml(file)}">${escapeHtml(file.split("/").pop())}</span>`
-        : "";
-      return `<div class="fd-row" data-line="${r.numbers[i]}"` +
-        `${file ? ` data-file="${escapeHtml(file)}"` : ""}>` +
-        `${fileCell}<span class="fd-n">${fmtNum(r.numbers[i])}</span>` +
-        `<span class="fd-txt">${badge}${tag}${decorateText(text, tab)}</span></div>`;
-    }).join("");
-  } else if (r) {
-    list.innerHTML = '<div class="fd-empty">Nenhuma linha encontrada no arquivo inteiro.</div>';
-  }
+  const holder = dock.querySelector(".fd-sections");
+  holder.appendChild(buildMarkedSection(tab));
+  for (const section of tab.findSections) holder.appendChild(buildSection(tab, section));
 
-  list.addEventListener("click", (e) => {
-    const row = e.target.closest(".fd-row");
-    if (!row) return;
-    list.querySelectorAll(".fd-row.on").forEach((n) => n.classList.remove("on"));
-    row.classList.add("on");
-    // Leva o log ate a linha correspondente; se o resultado for de outro
-    // arquivo, abre esse arquivo na linha certa.
-    const line = Number(row.dataset.line);
-    if (row.dataset.file && row.dataset.file !== tab.path) {
-      // A lista de resultados viaja junto: quem procura na pasta inteira
-      // precisa continuar clicando nos proximos sem refazer a busca.
-      const carry = {
-        findOpen: true, findResults: tab.findResults, findQuery: tab.findQuery,
-        findScope: tab.findScope, findScopeUsed: tab.findScopeUsed,
-        findHeight: tab.findHeight, liveFilter: tab.liveFilter,
-      };
-      openFile(row.dataset.file, line);
-      const opened = state.tabs.find((t) => t.path === row.dataset.file);
-      if (opened) {
-        Object.assign(opened, carry);
-        opened.filterTerms = filterTerms(opened);
-      }
-    } else {
-      jumpToLine(tab, line);
-    }
-  });
-
-  const fd = (name) => dock.querySelector(`[data-fd="${name}"]`);
-  fd("close").addEventListener("click", () => {
+  dock.querySelector('[data-fd="close"]').addEventListener("click", () => {
     tab.findOpen = false;
     refreshPanel(tab);
   });
-  fd("prev").addEventListener("click", () =>
-    searchWholeFile(tab, Math.max(0, tab.findResults.offset - FIND_PAGE)));
-  fd("next").addEventListener("click", () =>
-    searchWholeFile(tab, tab.findResults.offset + FIND_PAGE));
-  fd("export").addEventListener("click", () => exportFindResults(tab));
+  dock.querySelector('[data-fd="clear"]').addEventListener("click", () => {
+    tab.findSections = [];
+    refreshPanel(tab);
+  });
+  dock.querySelector('[data-fd="export"]').addEventListener("click", () => exportChecked(tab));
 
   dock.querySelector(".fd-resize").addEventListener("mousedown", (e) => {
     e.preventDefault();
@@ -1331,27 +1464,67 @@ function buildFindDock(tab) {
   return dock;
 }
 
-/** Baixa todas as linhas encontradas, nao so a pagina exibida no dock. */
-async function exportFindResults(tab) {
-  const { params } = fileSearchParams(tab);
-  params.set("offset", 0);
-  params.set("limit", 20000);
-  setStatus("Montando o arquivo de resultados...");
-  try {
-    const res = await fetch(`/api/filtered?${params}`);
-    const data = await res.json();
-    if (!res.ok) {
-      setStatus(data.error || "Erro exportando.", true);
-      return;
+/** Abre a linha com folga em volta: centralizada, com ~1.000 linhas de cada
+ *  lado, para dar contexto sem precisar navegar. */
+const JUMP_CONTEXT = 1000;
+
+function openAtLine(tab, line, file) {
+  if (file && file !== tab.path) {
+    // A lista de resultados viaja junto para continuar clicando nos proximos.
+    const carry = {
+      findOpen: true, findSections: tab.findSections, findScope: tab.findScope,
+      findHeight: tab.findHeight, liveFilter: tab.liveFilter,
+      colorCursor: tab.colorCursor,
+    };
+    openFile(file, line);
+    const opened = state.tabs.find((t) => t.path === file);
+    if (opened) {
+      Object.assign(opened, carry);
+      opened.filterTerms = activeTerms(opened);
     }
-    const body = data.lines.map((l, i) => `${data.line_numbers[i]}: ${l}`).join("\n");
-    const base = tab.path.split("/").pop().replace(/\.[^.]+$/, "");
-    downloadText(`${base}-busca.txt`, body + "\n");
-    setStatus(`${data.lines.length} linha(s) exportada(s)` +
-      (data.matched > data.lines.length ? ` de ${fmtNum(data.matched)} encontradas` : "") + ".");
-  } catch (err) {
-    setStatus("Falha na requisicao: " + err, true);
+    return;
   }
+  jumpToLine(tab, line);
+}
+
+/** Exporta as secoes marcadas com "exportar". */
+async function exportChecked(tab) {
+  const parts = [];
+  if (tab.markedExport) {
+    const rows = markedRows(tab);
+    if (rows.length) {
+      parts.push(`===== linhas marcadas (${rows.length}) =====`);
+      for (const row of rows) {
+        parts.push(`${row.n}: ${row.text ?? "(fora da pagina carregada)"}`);
+      }
+    }
+  }
+  for (const section of tab.findSections) {
+    if (!section.exportChecked || !section.results) continue;
+    // Exporta tudo o que a busca encontrou, nao so a pagina exibida.
+    let lines = section.results.lines;
+    let numbers = section.results.numbers;
+    if (section.scope === "current" && section.results.matched > lines.length) {
+      const { params } = fileSearchParams(tab, section.query);
+      params.set("offset", 0);
+      params.set("limit", 20000);
+      try {
+        const res = await fetch(`/api/filtered?${params}`);
+        const data = await res.json();
+        if (res.ok) { lines = data.lines; numbers = data.line_numbers; }
+      } catch { /* mantem a pagina carregada */ }
+    }
+    parts.push(`===== ${section.query} (${lines.length} de ${fmtNum(section.results.matched)}) =====`);
+    lines.forEach((l, i) => parts.push(`${numbers[i]}: ${l}`));
+  }
+
+  if (!parts.length) {
+    setStatus('Marque "exportar" em ao menos uma secao.', true);
+    return;
+  }
+  const base = tab.path.split("/").pop().replace(/\.[^.]+$/, "");
+  downloadText(`${base}-selecao.txt`, parts.join("\n") + "\n");
+  setStatus("Exportado.");
 }
 
 function wirePanel(tab, panel, toolbar, wrap, shown, paneIndex) {
@@ -1368,11 +1541,12 @@ function wirePanel(tab, panel, toolbar, wrap, shown, paneIndex) {
 
   const liveInput = toolbar.querySelector(".live-filter");
   let debounce;
+  // Digitar so repinta as palavras no log; nada e escondido. A busca de fato
+  // acontece no Enter e vai para a janela de resultados.
   liveInput.addEventListener("input", () => {
     clearTimeout(debounce);
     debounce = setTimeout(() => {
       tab.liveFilter = liveInput.value;
-      recomputeSearch(tab);
       refreshPanel(tab);
     }, 250);
   });
@@ -1383,7 +1557,7 @@ function wirePanel(tab, panel, toolbar, wrap, shown, paneIndex) {
     e.preventDefault();
     clearTimeout(debounce);
     tab.liveFilter = liveInput.value;
-    searchWholeFile(tab, 0);
+    runSearch(tab);
   });
 
   toolbar.querySelectorAll(".level-toggle").forEach((btn) => {
@@ -1391,18 +1565,20 @@ function wirePanel(tab, panel, toolbar, wrap, shown, paneIndex) {
       const lvl = btn.dataset.level;
       if (tab.levels.has(lvl)) tab.levels.delete(lvl);
       else tab.levels.add(lvl);
-      recomputeSearch(tab);
-      refreshPanel(tab);
+      refreshPanel(tab);   // marca as linhas do nivel; nao esconde nada
     });
   });
 
   const act = (name) => toolbar.querySelector(`[data-act="${name}"]`);
   // No modo "arquivo todo" a paginacao percorre o resultado filtrado.
   const goTo = (offset) => loadFileContent(tab, { offset });
+  // Avanca pelo que esta carregado: depois de um salto a janela e maior que a
+  // pagina escolhida, e paginar pelo valor do seletor repetiria linhas.
+  const step = () => Math.max(1, tab.lines.length || tab.limit);
   act("start").addEventListener("click", () => goTo(0));
   act("tail").addEventListener("click", () => loadFileContent(tab, { tail: true }));
-  act("prev").addEventListener("click", () => goTo(Math.max(0, tab.offset - tab.limit)));
-  act("next").addEventListener("click", () => goTo(tab.offset + tab.limit));
+  act("prev").addEventListener("click", () => goTo(Math.max(0, tab.offset - step())));
+  act("next").addEventListener("click", () => goTo(tab.offset + step()));
   act("pagesize").addEventListener("change", (e) => {
     tab.limit = Number(e.target.value);
     goTo(tab.offset);
@@ -1410,10 +1586,10 @@ function wirePanel(tab, panel, toolbar, wrap, shown, paneIndex) {
   act("find").addEventListener("click", () => promptSearch(tab));
   act("prevhit").addEventListener("click", () => stepSearch(tab, -1));
   act("nexthit").addEventListener("click", () => stepSearch(tab, 1));
-  act("filesearch").addEventListener("click", () => searchWholeFile(tab, 0));
+  act("filesearch").addEventListener("click", () => runSearch(tab));
   act("scope").addEventListener("change", (e) => {
     tab.findScope = e.target.value;
-    if (tab.liveFilter.trim()) searchWholeFile(tab, 0);
+    if (tab.liveFilter.trim()) runSearch(tab);
   });
   act("timeline").addEventListener("click", () => {
     tab.timelineOpen = !tab.timelineOpen;
@@ -1538,11 +1714,13 @@ function resetFilters(tab) {
   tab.liveFilter = "";
   tab.activeFilterId = null;
   tab.searchTerm = "";
+  tab.timeRange = null;
   recomputeSearch(tab);
   state.selectedFilterId = null;
   renderFilterList();
   refreshPanel(tab);
-  setStatus("Filtros e destaques limpos.");
+  // As buscas e as marcacoes ficam: sao trabalho do usuario, nao filtro.
+  setStatus("Filtros, marcas de nivel e destaques limpos.");
 }
 
 function exportLines(tab, shown) {
@@ -1614,7 +1792,9 @@ function showContextMenu(x, y, tab, picked) {
       disabled: !picked, act: () => addHighlight(picked, false) },
     { label: "Copiar linha(s)", act: () => copySelection(tab) },
     { label: "Exportar selecao...", act: () => exportLines(tab, []) },
+    { label: "Marcar para exportar", act: () => toggleExportMarks(tab) },
     { label: "Marcar/desmarcar (bookmark)", act: () => toggleBookmarks(tab) },
+    { label: "Ver linhas marcadas", act: () => { tab.findOpen = true; tab.markedCollapsed = false; } },
     { sep: true },
     { label: "Mostrar so a(s) TAG(s)" + tagLabel, disabled: !tags.size,
       act: () => { tags.forEach((t) => tab.showTags.add(t)); } },
@@ -1677,6 +1857,14 @@ window.addEventListener("blur", hideContextMenu);
 function copySelection(tab) {
   const text = tab.lines.filter((l) => tab.selected.has(l.n)).map((l) => l.text).join("\n");
   if (text) copyToClipboard(text, `${tab.selected.size} linha(s) copiada(s).`);
+}
+
+function toggleExportMarks(tab) {
+  for (const n of tab.selected) {
+    if (tab.exportMarks.has(n)) tab.exportMarks.delete(n);
+    else tab.exportMarks.add(n);
+  }
+  tab.findOpen = true;   // a janela abre para conferir antes de exportar
 }
 
 function toggleBookmarks(tab) {
@@ -2470,6 +2658,7 @@ function exportSession() {
       showPids: [...t.showPids], hidePids: [...t.hidePids],
       highlightTags: [...t.highlightTags], highlightPids: [...t.highlightPids],
       bookmarks: [...t.bookmarks],
+      exportMarks: [...t.exportMarks],
       timeRange: t.timeRange,
       activeFilterId: t.activeFilterId,
     })),
@@ -2522,7 +2711,7 @@ async function importSession(file) {
       levels: saved.levels, showTags: saved.showTags, hideTags: saved.hideTags,
       showPids: saved.showPids, hidePids: saved.hidePids,
       highlightTags: saved.highlightTags, highlightPids: saved.highlightPids,
-      bookmarks: saved.bookmarks,
+      bookmarks: saved.bookmarks, exportMarks: saved.exportMarks,
     })) {
       for (const v of values || []) tab[key].add(v);
     }
