@@ -288,10 +288,6 @@ function newTab(path) {
     procUids: null,
     procAmbiguous: null,
     procLoading: false,
-    // Filtro no servidor: quando ligado, a pagina exibida ja vem filtrada.
-    serverFilter: false,
-    serverMatched: 0,
-    serverTruncated: false,
     // Intervalo de tempo marcado a partir de duas linhas selecionadas.
     timeRange: null,
     // Blocos de stack trace abertos (por padrao ficam dobrados).
@@ -305,6 +301,7 @@ function newTab(path) {
     findQuery: "",
     findError: null,
     findHeight: null,
+    findScope: "current",
     // Cores atribuidas a cada palavra do filtro.
     filterTerms: [],
   };
@@ -905,7 +902,12 @@ function buildPanel(tab, paneIndex) {
     <input class="live-filter" list="filterHistoryList" value="${escapeHtml(tab.liveFilter)}"
       placeholder="Buscar no arquivo todo (Enter). Ex: sales_code|imei|serialno"
       title="Enter busca no ARQUIVO INTEIRO e abre a janela de resultados.&#10;&#10;a|b|c  = qualquer uma das palavras (cada uma ganha uma cor)&#10;a b    = a linha precisa ter as duas&#10;-a     = esconde as linhas com 'a' (so na pagina)&#10;Prefixos: tag: pid: tid: app: text: level:&#10;Aceita regex.">
-    <button data-act="filesearch" class="primary" title="Buscar no arquivo inteiro (Enter)">Buscar tudo</button>
+    <select data-act="scope" title="Onde procurar">
+      <option value="current"${(tab.findScope || "current") === "current" ? " selected" : ""}>neste arquivo</option>
+      <option value="open"${tab.findScope === "open" ? " selected" : ""}>arquivos abertos</option>
+      <option value="folder"${tab.findScope === "folder" ? " selected" : ""}>pasta inteira</option>
+    </select>
+    <button data-act="filesearch" class="primary" title="Buscar (Enter)">Buscar</button>
     <div class="level-toggles">
       ${LEVELS.map((l) => `<button class="level-toggle${tab.levels.has(l) ? " on" : ""}" data-level="${l}" title="Nivel ${l}">${l}</button>`).join("")}
     </div>
@@ -927,9 +929,6 @@ function buildPanel(tab, paneIndex) {
       <input type="checkbox" data-act="wrap"${tab.wrapText ? " checked" : ""}> Quebrar linha
     </label>
     <button data-act="export" title="Exportar as linhas visiveis (ou a selecao) para arquivo">Exportar</button>
-    <label class="toolbar-check" title="Aplicar o filtro ao arquivo inteiro no servidor, em vez de so a pagina carregada">
-      <input type="checkbox" data-act="server"${tab.serverFilter ? " checked" : ""}> Arquivo todo
-    </label>
     <button data-act="reset" title="Limpar todos os filtros e destaques">Limpar filtros</button>
     <span class="info"></span>
   `;
@@ -942,10 +941,7 @@ function buildPanel(tab, paneIndex) {
   info.textContent =
     `${fmtNum(shown.length)} linha(s)` +
     (hidden > 0 ? ` (${fmtNum(hidden)} ocultada(s) por filtro)` : "") +
-    (tab.serverFilter
-      ? ` | ${fmtNum(tab.serverMatched)} no arquivo todo${tab.serverTruncated ? "+" : ""}` +
-        ` | pagina ${fmtNum(tab.offset + 1)}-${fmtNum(tab.offset + tab.lines.length)}`
-      : ` | ${fmtNum(tab.offset + 1)}-${fmtNum(tab.offset + tab.lines.length)} de ${fmtNum(tab.totalLines)}`) +
+    ` | ${fmtNum(tab.offset + 1)}-${fmtNum(tab.offset + tab.lines.length)} de ${fmtNum(tab.totalLines)}` +
     (tab.size != null ? ` | ${fmtSize(tab.size)}` : "") +
     (tab.searchHits.length ? ` | ${tab.searchHits.length} ocorrencia(s)` : "");
 
@@ -1057,37 +1053,6 @@ function fmtDelta(ms) {
 }
 
 /** Traduz o filtro ao vivo e os toggles em parametros para /api/filtered. */
-function serverFilterParams(tab) {
-  const params = new URLSearchParams({ root: state.root, file: tab.path });
-  const terms = parseLiveFilter(tab.liveFilter, false);
-  const byField = { tag: [], msg: [], pid: [], tid: [], uid: [] };
-  let negate = false;
-  for (const term of terms) {
-    if (term.negate) { negate = true; continue; }
-    const field = term.field || "msg";
-    if (byField[field]) byField[field].push(term.re.source);
-  }
-  const join = (arr) => (arr.length ? arr.map((s) => `(?:${s})`).join(".*") : "");
-  if (byField.tag.length) params.set("tag", join(byField.tag));
-  if (byField.msg.length) params.set("text", join(byField.msg));
-  if (byField.pid.length) params.set("pid", join(byField.pid));
-  if (byField.tid.length) params.set("tid", join(byField.tid));
-  if (byField.uid.length) params.set("uid", join(byField.uid));
-  if (tab.levels.size) params.set("levels", [...tab.levels].join(","));
-
-  const filter = state.savedFilters.find((f) => f.id === tab.activeFilterId);
-  if (filter) {
-    if (filter.tag) params.set("tag", filter.tag);
-    if (filter.text) params.set("text", filter.text);
-    if (filter.pid) params.set("pid", filter.pid);
-    if (filter.tid) params.set("tid", filter.tid);
-    if (filter.levels && filter.levels.length) params.set("levels", filter.levels.join(","));
-    if (filter.negate) params.set("negate", "true");
-    if (filter.caseSensitive) params.set("case", "true");
-  }
-  return { params, hasCriteria: [...params.keys()].length > 2, negateIgnored: negate && !filter };
-}
-
 // ---------------------------------------------------------------------------
 // Busca no arquivo inteiro, com os resultados numa janela propria
 // ---------------------------------------------------------------------------
@@ -1131,44 +1096,120 @@ function fileSearchParams(tab) {
   return { params, hasCriteria: [...params.keys()].length > 2, negated };
 }
 
-/** Roda a busca no arquivo todo e abre a janela de resultados. */
+/** Leva o foco para a caixa de busca do painel ativo (Ctrl+F / Ctrl+Shift+F). */
+function focusSearchBox(scope) {
+  const tab = activeTab();
+  if (!tab) return;
+  if (scope) tab.findScope = scope;
+  const panel = panelsEl.querySelector(`[data-panel-id="${tab.id}"]`);
+  const input = panel && panel.querySelector(".live-filter");
+  if (!input) return;
+  if (scope) {
+    const sel = panel.querySelector('[data-act="scope"]');
+    if (sel) sel.value = scope;
+  }
+  input.focus();
+  input.select();
+}
+
+/** Busca com escopo em varios arquivos, reaproveitando /api/search. */
+async function searchAcrossFiles(tab, scope) {
+  const params = new URLSearchParams({ root: state.root, pattern: tab.liveFilter.trim() });
+  if (scope === "open") {
+    params.set("scope", "open");
+    params.set("open_files", state.tabs.map((t) => t.path).join(","));
+  } else {
+    params.set("scope", "folder");
+    params.set("max_files", 300);
+  }
+  params.set("flags", "i");
+  params.set("max_results", 2000);
+  params.set("total_max_results", 5000);
+  if (tab.levels.size) params.set("levels", [...tab.levels].join(","));
+
+  const res = await fetch(`/api/search?${params}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || "Erro na busca.");
+
+  // Achata os resultados por arquivo numa lista unica, do mesmo formato que a
+  // busca de um arquivo so devolve — assim a janela de resultados e uma so.
+  const lines = [], numbers = [], columns = [], files = [];
+  for (const fileResult of data.results) {
+    for (const m of fileResult.matches || []) {
+      lines.push(m.line);
+      numbers.push(m.line_number);
+      files.push(fileResult.path);
+      columns.push(m.level ? { level: m.level, tag: m.tag, pid: m.pid, tid: m.tid } : null);
+    }
+  }
+  return {
+    lines, numbers, columns, files,
+    matched: data.total_matches,
+    offset: 0,
+    hasMore: false,
+    truncated: data.results.some((r) => r.truncated) || data.files_truncated,
+    filesSearched: data.files_searched,
+  };
+}
+
+/** Busca unica do app: procura no arquivo inteiro (ou nos arquivos do escopo)
+ *  e abre a janela de resultados no rodape do painel. */
 async function searchWholeFile(tab, offset = 0) {
-  const { params, hasCriteria, negated } = fileSearchParams(tab);
-  if (!hasCriteria) {
-    setStatus("Digite algo na caixa de filtro para buscar no arquivo inteiro.", true);
+  const scope = tab.findScope || "current";
+  const query = tab.liveFilter.trim();
+  if (!query && !tab.levels.size) {
+    setStatus("Digite algo na caixa de busca.", true);
     return;
   }
-  params.set("offset", offset);
-  params.set("limit", FIND_PAGE);
 
-  saveToHistory(tab.liveFilter);
+  let params, hasCriteria, negated = 0;
+  if (scope === "current") {
+    ({ params, hasCriteria, negated } = fileSearchParams(tab));
+    if (!hasCriteria) {
+      setStatus("Digite algo na caixa de busca.", true);
+      return;
+    }
+    params.set("offset", offset);
+    params.set("limit", FIND_PAGE);
+  }
+
+  saveToHistory(query);
   tab.findOpen = true;
   tab.findLoading = true;
-  tab.findQuery = tab.liveFilter;
+  tab.findQuery = query;
+  tab.findScopeUsed = scope;
   refreshPanel(tab);
 
   try {
-    const res = await fetch(`/api/filtered?${params}`);
-    const data = await res.json();
-    if (!res.ok) {
-      tab.findError = data.error || "Erro na busca.";
-      tab.findResults = null;
-      return;
+    if (scope === "current") {
+      const res = await fetch(`/api/filtered?${params}`);
+      const data = await res.json();
+      if (!res.ok) {
+        tab.findError = data.error || "Erro na busca.";
+        tab.findResults = null;
+        return;
+      }
+      tab.findError = null;
+      tab.findResults = {
+        lines: data.lines,
+        numbers: data.line_numbers,
+        columns: data.columns || [],
+        files: null,
+        matched: data.matched,
+        offset: data.offset,
+        hasMore: data.has_more,
+        truncated: data.truncated,
+        negated,
+      };
+      setStatus(`${fmtNum(data.matched)} linha(s) encontradas no arquivo inteiro.`);
+    } else {
+      tab.findResults = await searchAcrossFiles(tab, scope);
+      tab.findError = null;
+      setStatus(`${fmtNum(tab.findResults.matched)} ocorrencia(s) em ` +
+        `${tab.findResults.filesSearched} arquivo(s).`);
     }
-    tab.findError = null;
-    tab.findResults = {
-      lines: data.lines,
-      numbers: data.line_numbers,
-      columns: data.columns || [],
-      matched: data.matched,
-      offset: data.offset,
-      hasMore: data.has_more,
-      truncated: data.truncated,
-      negated,
-    };
-    setStatus(`${fmtNum(data.matched)} linha(s) encontradas no arquivo inteiro.`);
   } catch (err) {
-    tab.findError = "Falha na requisicao: " + err;
+    tab.findError = "Falha na requisicao: " + err.message;
     tab.findResults = null;
   } finally {
     tab.findLoading = false;
@@ -1192,9 +1233,10 @@ function buildFindDock(tab) {
     : tab.findError
       ? tab.findError
       : r
-        ? `${fmtNum(r.matched)} linha(s)${r.truncated ? "+" : ""} para ` +
-          `"${escapeHtml(tab.findQuery)}"` +
-          (r.matched > r.lines.length
+        ? `${fmtNum(r.matched)} ${r.files ? "ocorrencia(s)" : "linha(s)"}` +
+          `${r.truncated ? "+" : ""} para "${escapeHtml(tab.findQuery)}"` +
+          (r.files ? ` em ${r.filesSearched} arquivo(s)` : "") +
+          (!r.files && r.matched > r.lines.length
             ? ` | mostrando ${fmtNum(r.offset + 1)}-${fmtNum(r.offset + r.lines.length)}`
             : "")
         : "";
@@ -1205,9 +1247,9 @@ function buildFindDock(tab) {
       `<strong class="${tab.findError ? "fd-err" : ""}">${head}</strong>` +
       `<span class="fd-legend">${legend}</span>` +
       `<span class="fd-spacer"></span>` +
-      `<button data-fd="prev" ${!r || r.offset === 0 ? "disabled" : ""} title="Resultados anteriores">&#8592;</button>` +
-      `<button data-fd="next" ${!r || !r.hasMore ? "disabled" : ""} title="Proximos resultados">&#8594;</button>` +
-      `<button data-fd="export" ${!r ? "disabled" : ""} title="Exportar todos os resultados">Exportar</button>` +
+      `<button data-fd="prev" ${!r || r.files || r.offset === 0 ? "disabled" : ""} title="Resultados anteriores">&#8592;</button>` +
+      `<button data-fd="next" ${!r || r.files || !r.hasMore ? "disabled" : ""} title="Proximos resultados">&#8594;</button>` +
+      `<button data-fd="export" ${!r || r.files ? "disabled" : ""} title="Exportar todos os resultados">Exportar</button>` +
       `<button data-fd="close" class="icon-btn" title="Fechar a janela de resultados">&times;</button>` +
     `</div>` +
     `<div class="fd-list"></div>`;
@@ -1218,8 +1260,14 @@ function buildFindDock(tab) {
       const c = r.columns[i];
       const badge = c && c.level ? `<span class="badge badge-${c.level}">${c.level}</span>` : "";
       const tag = c && c.tag ? `<span class="fd-tag">${escapeHtml(c.tag)}</span>` : "";
-      return `<div class="fd-row" data-line="${r.numbers[i]}">` +
-        `<span class="fd-n">${fmtNum(r.numbers[i])}</span>` +
+      // Numa busca por varios arquivos, o nome do arquivo vem antes da linha.
+      const file = r.files ? r.files[i] : null;
+      const fileCell = file
+        ? `<span class="fd-file" title="${escapeHtml(file)}">${escapeHtml(file.split("/").pop())}</span>`
+        : "";
+      return `<div class="fd-row" data-line="${r.numbers[i]}"` +
+        `${file ? ` data-file="${escapeHtml(file)}"` : ""}>` +
+        `${fileCell}<span class="fd-n">${fmtNum(r.numbers[i])}</span>` +
         `<span class="fd-txt">${badge}${tag}${decorateText(text, tab)}</span></div>`;
     }).join("");
   } else if (r) {
@@ -1231,8 +1279,26 @@ function buildFindDock(tab) {
     if (!row) return;
     list.querySelectorAll(".fd-row.on").forEach((n) => n.classList.remove("on"));
     row.classList.add("on");
-    // Leva a tabela principal ate a linha correspondente do log completo.
-    jumpToLine(tab, Number(row.dataset.line));
+    // Leva o log ate a linha correspondente; se o resultado for de outro
+    // arquivo, abre esse arquivo na linha certa.
+    const line = Number(row.dataset.line);
+    if (row.dataset.file && row.dataset.file !== tab.path) {
+      // A lista de resultados viaja junto: quem procura na pasta inteira
+      // precisa continuar clicando nos proximos sem refazer a busca.
+      const carry = {
+        findOpen: true, findResults: tab.findResults, findQuery: tab.findQuery,
+        findScope: tab.findScope, findScopeUsed: tab.findScopeUsed,
+        findHeight: tab.findHeight, liveFilter: tab.liveFilter,
+      };
+      openFile(row.dataset.file, line);
+      const opened = state.tabs.find((t) => t.path === row.dataset.file);
+      if (opened) {
+        Object.assign(opened, carry);
+        opened.filterTerms = filterTerms(opened);
+      }
+    } else {
+      jumpToLine(tab, line);
+    }
   });
 
   const fd = (name) => dock.querySelector(`[data-fd="${name}"]`);
@@ -1288,50 +1354,6 @@ async function exportFindResults(tab) {
   }
 }
 
-async function loadServerFiltered(tab, offset = 0) {
-  const { params, hasCriteria, negateIgnored } = serverFilterParams(tab);
-  if (!hasCriteria) {
-    setStatus("Defina um filtro (nivel, tag:, text:, pid:...) para buscar no arquivo todo.", true);
-    tab.serverFilter = false;
-    refreshPanel(tab);
-    return;
-  }
-  params.set("offset", offset);
-  params.set("limit", tab.limit);
-
-  setStatus("Filtrando o arquivo inteiro...");
-  try {
-    const res = await fetch(`/api/filtered?${params}`);
-    const data = await res.json();
-    if (!res.ok) {
-      setStatus(data.error || "Erro no filtro.", true);
-      tab.serverFilter = false;
-      refreshPanel(tab);
-      return;
-    }
-    tab.lines = data.lines.map((text, i) => ({
-      n: data.line_numbers[i],
-      text,
-      c: (data.columns || [])[i] || null,
-    }));
-    tab.offset = data.offset;
-    tab.hasMore = data.has_more;
-    tab.serverMatched = data.matched;
-    tab.serverTruncated = data.truncated;
-    tab.totalLines = data.total_lines || tab.totalLines;
-    tab.selected.clear();
-    tab.hlIdx = null;
-    recomputeSearch(tab);
-    refreshPanel(tab);
-    renderHighlightList();
-    setStatus(`${fmtNum(data.matched)} linha(s) casam no arquivo inteiro` +
-      (data.truncated ? " (limite de varredura atingido)" : "") +
-      (negateIgnored ? " | termos negados ('-') so valem na pagina carregada" : ""));
-  } catch (err) {
-    setStatus("Falha na requisicao: " + err, true);
-  }
-}
-
 function wirePanel(tab, panel, toolbar, wrap, shown, paneIndex) {
   const fileSelect = toolbar.querySelector(".pane-file");
   if (fileSelect) {
@@ -1350,10 +1372,6 @@ function wirePanel(tab, panel, toolbar, wrap, shown, paneIndex) {
     clearTimeout(debounce);
     debounce = setTimeout(() => {
       tab.liveFilter = liveInput.value;
-      if (tab.serverFilter) {
-        loadServerFiltered(tab, 0);
-        return;
-      }
       recomputeSearch(tab);
       refreshPanel(tab);
     }, 250);
@@ -1373,10 +1391,6 @@ function wirePanel(tab, panel, toolbar, wrap, shown, paneIndex) {
       const lvl = btn.dataset.level;
       if (tab.levels.has(lvl)) tab.levels.delete(lvl);
       else tab.levels.add(lvl);
-      if (tab.serverFilter) {
-        loadServerFiltered(tab, 0);
-        return;
-      }
       recomputeSearch(tab);
       refreshPanel(tab);
     });
@@ -1384,28 +1398,23 @@ function wirePanel(tab, panel, toolbar, wrap, shown, paneIndex) {
 
   const act = (name) => toolbar.querySelector(`[data-act="${name}"]`);
   // No modo "arquivo todo" a paginacao percorre o resultado filtrado.
-  const goTo = (offset) => tab.serverFilter
-    ? loadServerFiltered(tab, offset)
-    : loadFileContent(tab, { offset });
+  const goTo = (offset) => loadFileContent(tab, { offset });
   act("start").addEventListener("click", () => goTo(0));
-  act("tail").addEventListener("click", () => tab.serverFilter
-    ? goTo(Math.max(0, tab.serverMatched - tab.limit))
-    : loadFileContent(tab, { tail: true }));
+  act("tail").addEventListener("click", () => loadFileContent(tab, { tail: true }));
   act("prev").addEventListener("click", () => goTo(Math.max(0, tab.offset - tab.limit)));
   act("next").addEventListener("click", () => goTo(tab.offset + tab.limit));
   act("pagesize").addEventListener("change", (e) => {
     tab.limit = Number(e.target.value);
     goTo(tab.offset);
   });
-  act("server").addEventListener("change", (e) => {
-    tab.serverFilter = e.target.checked;
-    if (tab.serverFilter) loadServerFiltered(tab, 0);
-    else loadFileContent(tab, { offset: 0 });
-  });
   act("find").addEventListener("click", () => promptSearch(tab));
   act("prevhit").addEventListener("click", () => stepSearch(tab, -1));
   act("nexthit").addEventListener("click", () => stepSearch(tab, 1));
   act("filesearch").addEventListener("click", () => searchWholeFile(tab, 0));
+  act("scope").addEventListener("change", (e) => {
+    tab.findScope = e.target.value;
+    if (tab.liveFilter.trim()) searchWholeFile(tab, 0);
+  });
   act("timeline").addEventListener("click", () => {
     tab.timelineOpen = !tab.timelineOpen;
     refreshPanel(tab);
@@ -2456,7 +2465,6 @@ function exportSession() {
       limit: t.limit,
       wrapText: t.wrapText,
       liveFilter: t.liveFilter,
-      serverFilter: t.serverFilter,
       levels: [...t.levels],
       showTags: [...t.showTags], hideTags: [...t.hideTags],
       showPids: [...t.showPids], hidePids: [...t.hidePids],
@@ -2508,7 +2516,6 @@ async function importSession(file) {
     tab.limit = saved.limit || DEFAULT_PAGE_SIZE;
     tab.wrapText = !!saved.wrapText;
     tab.liveFilter = saved.liveFilter || "";
-    tab.serverFilter = !!saved.serverFilter;
     tab.activeFilterId = saved.activeFilterId || null;
     tab.timeRange = saved.timeRange || null;
     for (const [key, values] of Object.entries({
@@ -2535,8 +2542,7 @@ async function importSession(file) {
   for (const saved of session.tabs) {
     const tab = byPath.get(saved.path);
     if (!tab) continue;
-    if (tab.serverFilter) await loadServerFiltered(tab, saved.offset || 0);
-    else await loadFileContent(tab, { offset: saved.offset || 0 });
+    await loadFileContent(tab, { offset: saved.offset || 0 });
   }
   renderPanels();
   setStatus(`Sessao restaurada: ${state.tabs.length} aba(s).`);
@@ -2561,19 +2567,17 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
     if (!msgDialog.hidden) { msgDialog.hidden = true; return; }
     if (!filterDialog.hidden) { filterDialog.hidden = true; return; }
+    if (!glossaryDialog.hidden) { glossaryDialog.hidden = true; return; }
     if (!ctxMenu.hidden) { hideContextMenu(); return; }
-    if (!findPanel.hidden) { closeFindPanel(); return; }
-    return;
-  }
-  if (mod && e.shiftKey && e.key.toLowerCase() === "f") {
-    e.preventDefault();
-    openFindPanel();
-    return;
-  }
-  if (mod && !e.shiftKey && e.key.toLowerCase() === "f") {
-    e.preventDefault();
     const tab = activeTab();
-    if (tab) promptSearch(tab);
+    if (tab && tab.findOpen) { tab.findOpen = false; refreshPanel(tab); }
+    return;
+  }
+  // Uma busca so: Ctrl+F foca a caixa do painel; Ctrl+Shift+F faz o mesmo ja
+  // com o escopo na pasta inteira.
+  if (mod && e.key.toLowerCase() === "f") {
+    e.preventDefault();
+    focusSearchBox(e.shiftKey ? "folder" : null);
     return;
   }
   if (e.key === "F3") {
@@ -2641,226 +2645,3 @@ function renderHistoryDatalist() {
   }
 }
 renderHistoryDatalist();
-
-const findPanel = el("#findPanel");
-const findPattern = el("#findPattern");
-const findResultsEl = el("#findResults");
-const findSummaryEl = el("#findSummary");
-const findFolderOptions = el("#findFolderOptions");
-
-el("#findInFilesBtn").addEventListener("click", toggleFindPanel);
-el("#findCloseBtn").addEventListener("click", closeFindPanel);
-el("#findCollapseBtn").addEventListener("click", () => findPanel.classList.toggle("collapsed"));
-
-document.querySelectorAll('input[name="findScope"]').forEach((r) =>
-  r.addEventListener("change", () => {
-    findFolderOptions.hidden =
-      document.querySelector('input[name="findScope"]:checked').value !== "folder";
-  })
-);
-el("#findSearchBtn").addEventListener("click", () => runFindSearch());
-findPattern.addEventListener("keydown", (e) => { if (e.key === "Enter") runFindSearch(); });
-el("#findTag").addEventListener("keydown", (e) => { if (e.key === "Enter") runFindSearch(); });
-el("#findPid").addEventListener("keydown", (e) => { if (e.key === "Enter") runFindSearch(); });
-el("#findUid").addEventListener("keydown", (e) => { if (e.key === "Enter") runFindSearch(); });
-el("#findRefreshFieldsBtn").addEventListener("click", refreshLogFields);
-
-function currentFindScopeParams() {
-  const scope = document.querySelector('input[name="findScope"]:checked').value;
-  const params = scopeParams(scope);
-  if (params && scope === "folder") {
-    const glob = el("#findGlob").value.trim();
-    if (glob) params.set("glob", glob);
-  }
-  return params;
-}
-
-async function refreshLogFields() {
-  const params = currentFindScopeParams();
-  const infoEl = el("#findFieldsInfo");
-  if (!state.root || !params) {
-    infoEl.textContent = "Abra um arquivo ou selecione um escopo valido primeiro.";
-    return;
-  }
-  el("#findRefreshFieldsBtn").disabled = true;
-  infoEl.textContent = "Escaneando...";
-  try {
-    const res = await fetch(`/api/log_fields?${params}`);
-    const data = await res.json();
-    if (!res.ok) {
-      infoEl.textContent = data.error || "Erro ao escanear campos.";
-      return;
-    }
-    el("#findTagList").innerHTML = data.tags.map((t) => `<option value="${escapeHtml(t)}">`).join("");
-    el("#findPidList").innerHTML = data.pids.map((p) => `<option value="${escapeHtml(p)}">`).join("");
-    el("#findUidList").innerHTML = data.uids.map((u) => `<option value="${escapeHtml(u)}">`).join("");
-    infoEl.textContent = `${data.lines_parsed} de ${data.lines_scanned} linha(s) reconhecidas como ` +
-      `logcat em ${data.files_used} arquivo(s) - ${data.tags.length} tags, ${data.uids.length} uids`;
-  } catch (err) {
-    infoEl.textContent = "Falha na requisicao: " + err;
-  } finally {
-    el("#findRefreshFieldsBtn").disabled = false;
-  }
-}
-
-function toggleFindPanel() {
-  if (findPanel.hidden) openFindPanel();
-  else closeFindPanel();
-}
-
-function openFindPanel() {
-  findPanel.hidden = false;
-  findPanel.classList.remove("collapsed");
-  const currentRadio = document.querySelector('input[name="findScope"][value="current"]');
-  if (currentRadio && !state.activeTab) {
-    document.querySelector('input[name="findScope"][value="open"]').checked = true;
-    findFolderOptions.hidden = true;
-  }
-  findPattern.focus();
-  findPattern.select();
-}
-
-function closeFindPanel() {
-  findPanel.hidden = true;
-}
-
-el("#findResizeHandle").addEventListener("mousedown", (e) => {
-  e.preventDefault();
-  const startY = e.clientY;
-  const startHeight = findPanel.getBoundingClientRect().height;
-  const onMove = (ev) => {
-    const newHeight = Math.min(Math.max(startHeight + startY - ev.clientY, 140), window.innerHeight * 0.85);
-    findPanel.style.height = newHeight + "px";
-  };
-  const onUp = () => {
-    document.removeEventListener("mousemove", onMove);
-    document.removeEventListener("mouseup", onUp);
-  };
-  document.addEventListener("mousemove", onMove);
-  document.addEventListener("mouseup", onUp);
-});
-
-function selectedLevels() {
-  return Array.from(document.querySelectorAll("#findLevelChips input:checked")).map((c) => c.value);
-}
-
-const FIND_DEFAULT_CAP = 5000;
-const FIND_LOAD_ALL_CAP = 200000;
-
-async function runFindSearch(resultCap = FIND_DEFAULT_CAP) {
-  const pattern = findPattern.value.trim();
-  const levels = selectedLevels();
-  const tag = el("#findTag").value.trim();
-  const pid = el("#findPid").value.trim();
-  const uid = el("#findUid").value.trim();
-  if (!pattern && !(levels.length || tag || pid || uid)) return;
-  if (!state.root) {
-    findSummaryEl.textContent = "Carregue uma pasta primeiro.";
-    findSummaryEl.className = "find-summary err";
-    return;
-  }
-  if (pattern) saveToHistory(pattern);
-
-  const caseSensitive = el("#findCaseSensitive").checked;
-  const params = currentFindScopeParams();
-  if (!params) {
-    const scope = document.querySelector('input[name="findScope"]:checked').value;
-    findSummaryEl.textContent =
-      scope === "current" ? "Nenhum arquivo aberto no momento." : "Nenhum arquivo aberto.";
-    findSummaryEl.className = "find-summary err";
-    return;
-  }
-  if (pattern) params.set("pattern", pattern);
-  params.set("max_results", resultCap);
-  params.set("total_max_results", resultCap);
-  if (!caseSensitive) params.set("flags", "i");
-  if (params.get("scope") === "folder") params.set("max_files", 300);
-  if (levels.length) params.set("levels", levels.join(","));
-  if (tag) params.set("tags", tag);
-  if (pid) params.set("pids", pid);
-  if (uid) params.set("uids", uid);
-
-  findSummaryEl.textContent = resultCap > FIND_DEFAULT_CAP ? "Buscando tudo (pode demorar)..." : "Buscando...";
-  findSummaryEl.className = "find-summary";
-  findResultsEl.innerHTML = "";
-  el("#findSearchBtn").disabled = true;
-
-  try {
-    const res = await fetch(`/api/search?${params}`);
-    const data = await res.json();
-    if (!res.ok) {
-      findSummaryEl.textContent = data.error || "Erro na busca.";
-      findSummaryEl.className = "find-summary err";
-      return;
-    }
-    renderFindResults(data, pattern, caseSensitive, resultCap);
-  } catch (err) {
-    findSummaryEl.textContent = "Falha na requisicao: " + err;
-    findSummaryEl.className = "find-summary err";
-  } finally {
-    el("#findSearchBtn").disabled = false;
-  }
-}
-
-function renderFindResults(data, pattern, caseSensitive, resultCap) {
-  const filesWithMatches = data.results.filter((r) => r.matches && r.matches.length);
-  const anyTruncated = data.results.some((r) => r.truncated) || data.files_truncated;
-  findSummaryEl.className = "find-summary";
-  findSummaryEl.textContent =
-    `${data.total_matches} ocorrencia(s) em ${filesWithMatches.length} de ${data.files_searched} arquivo(s)` +
-    (data.files_truncated ? " (lista de arquivos truncada)" : "");
-
-  const oldLoadAllBtn = el("#findLoadAllBtn");
-  if (oldLoadAllBtn) oldLoadAllBtn.remove();
-  if (anyTruncated && resultCap < FIND_LOAD_ALL_CAP) {
-    const btn = document.createElement("button");
-    btn.id = "findLoadAllBtn";
-    btn.className = "find-load-all";
-    btn.textContent = "Resultado incompleto (limite atingido) - carregar tudo";
-    btn.addEventListener("click", () => runFindSearch(FIND_LOAD_ALL_CAP));
-    findSummaryEl.after(btn);
-  }
-
-  findResultsEl.innerHTML = "";
-  if (!filesWithMatches.length) {
-    findResultsEl.innerHTML = '<div class="find-empty">Nenhum resultado.</div>';
-    return;
-  }
-
-  for (const fileResult of filesWithMatches) {
-    const group = document.createElement("div");
-    group.className = "find-file-group";
-
-    const header = document.createElement("div");
-    header.className = "find-file-header";
-    header.innerHTML = `${escapeHtml(fileResult.path)} <span class="count">(${fileResult.matches.length}` +
-      `${fileResult.truncated ? "+" : ""} ocorrencia(s))</span>`;
-    const body = document.createElement("div");
-    header.addEventListener("click", () => {
-      body.style.display = body.style.display === "none" ? "block" : "none";
-    });
-    group.appendChild(header);
-
-    for (const m of fileResult.matches) {
-      const line = document.createElement("div");
-      line.className = "line";
-      const badge = m.level ? `<span class="badge badge-${m.level}">${m.level}</span>` : "";
-      line.innerHTML = `<span class="ln">${m.line_number}</span>` +
-        `<span class="txt">${badge}${highlightFind(m.line, pattern, caseSensitive)}</span>`;
-      line.addEventListener("click", () => openFile(fileResult.path, m.line_number));
-      body.appendChild(line);
-    }
-    group.appendChild(body);
-    findResultsEl.appendChild(group);
-  }
-}
-
-function highlightFind(text, pattern, caseSensitive) {
-  if (!pattern) return escapeHtml(text);
-  try {
-    const re = new RegExp(pattern, caseSensitive ? "g" : "gi");
-    return escapeHtml(text).replace(re, (m) => `<mark>${m}</mark>`);
-  } catch {
-    return escapeHtml(text);
-  }
-}

@@ -645,93 +645,7 @@ mark.hl-7, .hl-chip.hl-7, .hl-swatch.hl-7, .fd-term.hl-7 { background: #fcc2d7; 
 .dialog-label { font-size: 11px; color: var(--fg-dim); }
 .dialog-check { flex-direction: row !important; align-items: center; gap: 6px !important; color: var(--fg) !important; font-size: 12px !important; }
 
-/* ---- Painel de busca em arquivos (inalterado no comportamento) ---- */
-.find-panel {
-  position: fixed;
-  left: 0; right: 0; bottom: 0;
-  height: 320px;
-  z-index: 50;
-  display: flex;
-  flex-direction: column;
-  background: var(--bg-panel);
-  border-top: 1px solid var(--border);
-  box-shadow: 0 -4px 16px rgba(0,0,0,.2);
-}
-/* O atributo hidden precisa vencer o display:flex acima. */
-.find-panel[hidden] { display: none; }
-.find-panel.collapsed { height: auto !important; }
-.find-panel.collapsed .find-body, .find-panel.collapsed .find-results { display: none; }
-.find-resize-handle { height: 6px; cursor: row-resize; background: var(--bg-header); }
-.find-resize-handle::after {
-  content: "";
-  display: block;
-  width: 40px;
-  height: 2px;
-  margin: 2px auto;
-  background: var(--border);
-  border-radius: 2px;
-}
-.find-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 5px 8px;
-  background: var(--bg-header);
-  border-bottom: 1px solid var(--border-soft);
-}
-.find-header-actions { display: flex; gap: 4px; }
-.find-close { padding: 1px 7px; }
-.find-body { padding: 8px; display: flex; flex-direction: column; gap: 6px; }
-.find-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-.find-row #findPattern { flex: 1 1 320px; }
-.find-options { gap: 14px; font-size: 11px; }
-.find-scope { display: flex; gap: 10px; }
-.find-scope label, .find-check { display: flex; align-items: center; gap: 4px; }
-.find-folder-opts { flex: 1 1 260px; }
-.find-folder-opts input { width: 100%; }
-.find-advanced { border: 1px solid var(--border-soft); border-radius: 4px; padding: 4px 6px; }
-.find-advanced summary { cursor: pointer; font-size: 11px; color: var(--fg-dim); }
-.find-adv-body { display: flex; flex-direction: column; gap: 6px; padding-top: 6px; }
-.find-adv-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-.find-adv-row input { flex: 1 1 180px; }
-.find-adv-label { font-size: 11px; color: var(--fg-dim); }
-.find-fields-info { font-size: 10.5px; color: var(--fg-dim); }
-.find-level-chips { display: flex; gap: 4px; }
-.level-chip {
-  display: flex; align-items: center; gap: 3px;
-  padding: 1px 6px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  font-size: 11px;
-  cursor: pointer;
-}
-.level-chip.level-V { color: var(--lvl-V); }
-.level-chip.level-D { color: var(--lvl-D); }
-.level-chip.level-I { color: var(--lvl-I); }
-.level-chip.level-W { color: var(--lvl-W); }
-.level-chip.level-E { color: var(--lvl-E); }
-.level-chip.level-F { color: var(--lvl-F); }
-.find-summary { font-size: 11px; color: var(--fg-dim); }
-.find-summary.err { color: var(--lvl-E); }
-.find-load-all { align-self: flex-start; margin: 4px 8px; }
-.find-results { flex: 1; overflow: auto; font-family: var(--mono); font-size: 11.5px; }
-.find-file-group { border-bottom: 1px solid var(--border-soft); }
-.find-file-header {
-  padding: 4px 8px;
-  background: var(--bg-alt);
-  cursor: pointer;
-  font-family: system-ui, sans-serif;
-  font-size: 11.5px;
-  font-weight: 600;
-  position: sticky;
-  top: 0;
-}
-.find-file-header .count { color: var(--fg-dim); font-weight: 400; }
-.find-results .line { display: flex; gap: 8px; padding: 1px 8px; cursor: pointer; }
-.find-results .line:hover { background: var(--bg-hover); }
-.find-results .line .ln { color: var(--fg-dim); min-width: 70px; text-align: right; }
-.find-results .line .txt { white-space: pre-wrap; word-break: break-word; }
-.find-empty { padding: 10px; color: var(--fg-dim); }
+/* ---- Selo de nivel usado na janela de resultados ---- */
 .badge {
   display: inline-block;
   min-width: 14px;
@@ -800,3 +714,15 @@ mark.hl-7, .hl-chip.hl-7, .hl-swatch.hl-7, .fd-term.hl-7 { background: #fcc2d7; 
 
 /* Caixa "ir para a linha". */
 .goto-line { width: 74px; font-size: 11px; text-align: right; }
+
+/* Nome do arquivo nos resultados, quando a busca cobre varios arquivos. */
+.fd-file {
+  color: var(--accent);
+  min-width: 150px;
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+.fd-row.on .fd-file { color: inherit; }
