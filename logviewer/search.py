@@ -4,7 +4,7 @@ import re
 
 from .fsops import guess_ext_is_text, resolve_root, sniff_is_text
 from .logline import line_matches_fields, parse_logcat_line
-from .reader import detect_encoding
+from .reader import cached_format, detect_encoding
 
 DEFAULT_MAX_RESULTS = 500
 MAX_MAX_RESULTS = 200_000
@@ -40,6 +40,7 @@ def search_file(path, compiled, max_results, context, field_filters=None):
 
     has_field_filters = bool(field_filters and any(field_filters.values()))
     encoding = detect_encoding(path)
+    log_format = cached_format(path, encoding)
     matches = []
     buffer = []  # rolling buffer of recent lines for "before" context
 
@@ -55,7 +56,7 @@ def search_file(path, compiled, max_results, context, field_filters=None):
 
             parsed = None
             if has_field_filters:
-                parsed = parse_logcat_line(line)
+                parsed = parse_logcat_line(line, log_format)
                 if not line_matches_fields(parsed, **field_filters):
                     continue
 
@@ -68,7 +69,7 @@ def search_file(path, compiled, max_results, context, field_filters=None):
                 span = [0, 0]
 
             if parsed is None:
-                parsed = parse_logcat_line(line)  # so-so cost: only for actual matches, used for UI badges
+                parsed = parse_logcat_line(line, log_format)  # so-so cost: only for actual matches, used for UI badges
 
             before = buffer[:-1]
             after = []
@@ -88,6 +89,10 @@ def search_file(path, compiled, max_results, context, field_filters=None):
                 "level": parsed["level"] if parsed else None,
                 "tag": parsed["tag"] if parsed else None,
                 "pid": parsed["pid"] if parsed else None,
+                "tid": parsed["tid"] if parsed else None,
+                "uid": parsed["uid"] if parsed else None,
+                "time": parsed["time"] if parsed else None,
+                "msg": parsed["msg"] if parsed else None,
             })
 
             if len(matches) >= max_results:

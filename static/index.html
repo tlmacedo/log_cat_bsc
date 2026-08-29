@@ -1,31 +1,168 @@
 <!doctype html>
-<html lang="pt-br">
+<html lang="pt-br" data-theme="light">
 <head>
 <meta charset="utf-8">
 <title>Log Viewer</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%231a6dcc'/%3E%3Cg fill='%23fff'%3E%3Crect x='3' y='4' width='4' height='1.6'/%3E%3Crect x='8' y='4' width='5' height='1.6'/%3E%3Crect x='3' y='7.2' width='6' height='1.6'/%3E%3Crect x='3' y='10.4' width='3' height='1.6'/%3E%3Crect x='7' y='10.4' width='6' height='1.6'/%3E%3C/g%3E%3C/svg%3E">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <div id="topbar">
     <input id="rootInput" placeholder="Caminho da pasta de logs, ex: /Volumes/Development/SIDIA/log_cat_bsc/log">
     <button id="loadBtn">Carregar pasta</button>
-    <button id="findInFilesBtn" title="Buscar (Ctrl+F)">Buscar</button>
+    <button id="findInFilesBtn" title="Buscar em varios arquivos (Ctrl+Shift+F)">Buscar em arquivos</button>
     <span id="status"></span>
+    <span class="topbar-spacer"></span>
+    <label class="topbar-check" title="Ao clicar numa linha, os outros paineis pulam para o horario mais proximo">
+      <input type="checkbox" id="syncTime" checked> Sincronizar por hora
+    </label>
+    <select id="paneCount" title="Dividir a area de log em varios paineis">
+      <option value="1">1 painel</option>
+      <option value="2">2 paineis</option>
+      <option value="3">3 paineis</option>
+    </select>
+    <button id="sessionSaveBtn" class="icon-btn" title="Salvar sessao (abas, filtros, destaques e marcadores)">&#128190;</button>
+    <button id="sessionLoadBtn" class="icon-btn" title="Abrir sessao salva">&#128193;</button>
+    <input type="file" id="sessionFile" accept=".json" hidden>
+    <button id="glossaryBtn" class="icon-btn" title="Glossario de siglas de log (PID, TID, UID, ANR, AMS...)">?</button>
+    <button id="themeBtn" class="icon-btn" title="Alternar tema claro/escuro">&#9681;</button>
   </div>
+
   <div id="main">
-    <div id="tree"></div>
+    <aside id="sidebar">
+      <div class="side-tabs" role="tablist">
+        <button class="side-tab active" data-side="files">Arquivos</button>
+        <button class="side-tab" data-side="device">Aparelho</button>
+        <button class="side-tab" data-side="filters">Filtros</button>
+        <button class="side-tab" data-side="highlights">Destaques</button>
+      </div>
+
+      <section class="side-pane active" data-pane="files">
+        <div id="tree"></div>
+      </section>
+
+      <section class="side-pane" data-pane="device">
+        <div class="side-toolbar">
+          <select id="deviceScope" title="Quais arquivos analisar">
+            <option value="current">Arquivo atual</option>
+            <option value="open">Arquivos abertos</option>
+            <option value="folder">Pasta inteira</option>
+          </select>
+          <button id="deviceScanBtn" title="Analisar hardware e software presentes no log">Analisar</button>
+          <button id="deviceCopyBtn" class="icon-btn" title="Copiar tudo">&#128203;</button>
+        </div>
+        <input id="deviceSearch" class="side-search" placeholder="Filtrar informacoes...">
+        <div id="deviceInfo" class="device-info">
+          <p class="side-hint">Abra um arquivo de log e clique em <strong>Analisar</strong> para
+          extrair modelo, build, kernel, CPU, memoria, bateria, telefonia e demais dados do aparelho.</p>
+        </div>
+      </section>
+
+      <section class="side-pane" data-pane="filters">
+        <div class="side-toolbar">
+          <button id="filterAddBtn" title="Novo filtro salvo">+ Novo</button>
+          <button id="filterEditBtn" title="Editar o filtro selecionado">Editar</button>
+          <button id="filterDelBtn" title="Excluir o filtro selecionado">Excluir</button>
+          <button id="filterExportBtn" class="icon-btn" title="Exportar filtros (JSON)">&#8681;</button>
+          <button id="filterImportBtn" class="icon-btn" title="Importar filtros (JSON)">&#8679;</button>
+          <input type="file" id="filterImportFile" accept=".json" hidden>
+        </div>
+        <ul id="filterList" class="filter-list"></ul>
+        <p class="side-hint">Filtros salvos combinam nivel, TAG, PID, TID e texto. Marque
+        <em>negar</em> para excluir as linhas que casarem, no estilo <em>is not</em>.</p>
+      </section>
+
+      <section class="side-pane" data-pane="highlights">
+        <div class="side-toolbar hl-add">
+          <input id="hlPattern" placeholder="Palavra ou regex para destacar">
+          <div id="hlSwatches" class="hl-swatches"></div>
+          <label class="hl-check"><input type="checkbox" id="hlCase"> Aa</label>
+          <button id="hlAddBtn" class="primary">Destacar</button>
+          <button id="hlFromSelBtn" title="Destacar o texto selecionado na tabela de log">Do texto selecionado</button>
+        </div>
+        <ul id="hlList" class="hl-list"></ul>
+        <p class="side-hint">Clique num destaque para pular para a proxima ocorrencia.
+        <strong>F3</strong> avanca e <strong>Shift+F3</strong> volta no destaque ativo.
+        As ocorrencias contadas sao as da pagina carregada.</p>
+      </section>
+    </aside>
+
+    <div id="sidebarResize" class="v-resize" title="Arraste para redimensionar"></div>
+
     <div id="content">
       <div id="tabs"></div>
-      <div id="panels">
-        <div class="empty-state">Selecione uma pasta e clique em um arquivo de texto na arvore.</div>
-      </div>
+      <div id="panels"></div>
     </div>
   </div>
 
+  <!-- Menu de contexto da tabela de log (botao direito) -->
+  <ul id="ctxMenu" class="ctx-menu" hidden></ul>
+
+  <!-- Visualizador de mensagem (duplo clique na linha) -->
+  <div id="msgDialog" class="dialog-backdrop" hidden>
+    <div class="dialog">
+      <header>
+        <strong>Mensagem</strong>
+        <div>
+          <button id="msgFormatJson">Formatar JSON</button>
+          <button id="msgCopy">Copiar</button>
+          <button id="msgClose" class="icon-btn">&times;</button>
+        </div>
+      </header>
+      <div id="msgMeta" class="dialog-meta"></div>
+      <pre id="msgBody" class="dialog-body"></pre>
+    </div>
+  </div>
+
+  <!-- Glossario de siglas de log -->
+  <div id="glossaryDialog" class="dialog-backdrop" hidden>
+    <div class="dialog">
+      <header>
+        <strong>Glossario de siglas de log</strong>
+        <div>
+          <input id="glossarySearch" placeholder="Filtrar...">
+          <button id="glossaryClose" class="icon-btn">&times;</button>
+        </div>
+      </header>
+      <div id="glossaryBody" class="dialog-body glossary-body"></div>
+    </div>
+  </div>
+
+  <!-- Editor de filtro salvo -->
+  <div id="filterDialog" class="dialog-backdrop" hidden>
+    <div class="dialog dialog-narrow">
+      <header>
+        <strong id="filterDialogTitle">Novo filtro</strong>
+        <button id="filterDialogClose" class="icon-btn">&times;</button>
+      </header>
+      <div class="dialog-form">
+        <label>Nome <input id="fdName" placeholder="ex: Erros do meu app"></label>
+        <label>TAG <input id="fdTag" placeholder="regex, ex: ActivityManager|Vold"></label>
+        <label>Texto da mensagem <input id="fdText" placeholder="regex, ex: Exception|timeout"></label>
+        <div class="dialog-row">
+          <label>PID <input id="fdPid" placeholder="ex: 3154"></label>
+          <label>TID <input id="fdTid" placeholder="ex: 4048"></label>
+        </div>
+        <div class="dialog-row">
+          <span class="dialog-label">Niveis</span>
+          <div id="fdLevels" class="level-toggles"></div>
+        </div>
+        <label class="dialog-check"><input type="checkbox" id="fdNegate">
+          Negar (esconder as linhas que casarem &mdash; <em>is not</em>)</label>
+        <label class="dialog-check"><input type="checkbox" id="fdCase"> Diferenciar maiusculas/minusculas</label>
+      </div>
+      <footer>
+        <button id="fdSave" class="primary">Salvar</button>
+        <button id="fdCancel">Cancelar</button>
+      </footer>
+    </div>
+  </div>
+
+  <!-- Busca multi-arquivo (Ctrl+Shift+F), painel inferior estilo Notepad++ -->
   <div id="findPanel" class="find-panel" hidden>
     <div id="findResizeHandle" class="find-resize-handle" title="Arraste para redimensionar"></div>
     <div class="find-header">
-      <strong>Buscar</strong>
+      <strong>Buscar em arquivos</strong>
       <div class="find-header-actions">
         <button id="findCollapseBtn" class="find-close" title="Colapsar/expandir painel">&#9662;</button>
         <button id="findCloseBtn" class="find-close" title="Fechar (Esc)">&times;</button>
@@ -79,6 +216,7 @@
     </div>
     <div id="findResults" class="find-results"></div>
   </div>
+
   <script src="app.js"></script>
 </body>
 </html>
