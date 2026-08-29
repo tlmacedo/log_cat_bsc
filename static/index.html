@@ -21,6 +21,10 @@
       <option value="2">2 paineis</option>
       <option value="3">3 paineis</option>
     </select>
+    <button id="sessionSaveBtn" class="icon-btn" title="Salvar sessao (abas, filtros, destaques e marcadores)">&#128190;</button>
+    <button id="sessionLoadBtn" class="icon-btn" title="Abrir sessao salva">&#128193;</button>
+    <input type="file" id="sessionFile" accept=".json" hidden>
+    <button id="glossaryBtn" class="icon-btn" title="Glossario de siglas de log (PID, TID, UID, ANR, AMS...)">?</button>
     <button id="themeBtn" class="icon-btn" title="Alternar tema claro/escuro">&#9681;</button>
   </div>
 
@@ -107,6 +111,20 @@
       </header>
       <div id="msgMeta" class="dialog-meta"></div>
       <pre id="msgBody" class="dialog-body"></pre>
+    </div>
+  </div>
+
+  <!-- Glossario de siglas de log -->
+  <div id="glossaryDialog" class="dialog-backdrop" hidden>
+    <div class="dialog">
+      <header>
+        <strong>Glossario de siglas de log</strong>
+        <div>
+          <input id="glossarySearch" placeholder="Filtrar...">
+          <button id="glossaryClose" class="icon-btn">&times;</button>
+        </div>
+      </header>
+      <div id="glossaryBody" class="dialog-body glossary-body"></div>
     </div>
   </div>
 

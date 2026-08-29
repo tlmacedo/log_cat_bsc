@@ -96,7 +96,7 @@ def _tail_lines_bytes(path, n):
     return lines[-n:] if n else []
 
 
-def _columns(lines, log_format):
+def columns_for(lines, log_format):
     """Campos de logcat de cada linha, na ordem das linhas recebidas."""
     parsed = parse_lines(lines, log_format)
     cols = []
@@ -154,7 +154,7 @@ def read_file(path, offset=0, limit=DEFAULT_LIMIT, tail=False, parse=True):
         return {
             "binary": False,
             "lines": lines,
-            "columns": _columns(lines, log_format) if parse else None,
+            "columns": columns_for(lines, log_format) if parse else None,
             "offset": start,
             "returned": len(lines),
             "has_more": False,
@@ -171,7 +171,7 @@ def read_file(path, offset=0, limit=DEFAULT_LIMIT, tail=False, parse=True):
     return {
         "binary": False,
         "lines": lines,
-        "columns": _columns(lines, log_format) if parse else None,
+        "columns": columns_for(lines, log_format) if parse else None,
         "offset": offset,
         "returned": len(lines),
         "has_more": offset + len(lines) < total_lines,

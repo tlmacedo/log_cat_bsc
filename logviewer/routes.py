@@ -1,11 +1,12 @@
 import os
+import re
 
 from flask import Blueprint, jsonify, request
 
-from . import deviceinfo
+from . import analysis, deviceinfo, glossary
 from .fsops import PathError, list_tree, resolve_within_root
 from .logline import scan_fields
-from .reader import cached_format, detect_encoding, read_file
+from .reader import cached_format, columns_for, count_lines, detect_encoding, read_file
 from .search import RegexError, gather_folder_files, search_files
 
 api = Blueprint("api", __name__, url_prefix="/api")
@@ -121,6 +122,117 @@ def get_search():
         "files_searched": len(results),
         "files_truncated": files_truncated,
     })
+
+
+def _resolve_log_file(root, rel_path):
+    """Resolve um arquivo do escopo e devolve (caminho, encoding, formato).
+    Levanta PathError ou ValueError com mensagem pronta para a UI."""
+    full_path = resolve_within_root(root, rel_path)
+    if os.path.isdir(full_path):
+        raise ValueError(f"'{rel_path}' e um diretorio, nao um arquivo.")
+    encoding = detect_encoding(full_path)
+    return full_path, encoding, cached_format(full_path, encoding)
+
+
+@api.get("/timeline")
+def get_timeline():
+    """Mapa de calor do arquivo inteiro: niveis e eventos notaveis por faixa de
+    linhas, para a barra de navegacao."""
+    root = request.args.get("root", "")
+    rel_path = request.args.get("file", "")
+    buckets = request.args.get("buckets", analysis.DEFAULT_BUCKETS, type=int)
+
+    try:
+        full_path, encoding, log_format = _resolve_log_file(root, rel_path)
+    except PathError as e:
+        return jsonify({"error": str(e)}), 400
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    try:
+        total = count_lines(full_path)
+        result = analysis.timeline(full_path, encoding, log_format, total, buckets)
+    except OSError as e:
+        return jsonify({"error": f"Erro lendo arquivo: {e}"}), 500
+
+    result["path"] = rel_path
+    result["format"] = log_format
+    return jsonify(result)
+
+
+@api.get("/process_map")
+def get_process_map():
+    """Descobre a que processo pertence cada PID visto no arquivo."""
+    root = request.args.get("root", "")
+    rel_path = request.args.get("file", "")
+
+    try:
+        full_path, encoding, log_format = _resolve_log_file(root, rel_path)
+    except PathError as e:
+        return jsonify({"error": str(e)}), 400
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    try:
+        result = analysis.process_map(full_path, encoding, log_format)
+    except OSError as e:
+        return jsonify({"error": f"Erro lendo arquivo: {e}"}), 500
+
+    result["path"] = rel_path
+    return jsonify(result)
+
+
+@api.get("/filtered")
+def get_filtered():
+    """Uma pagina do resultado de um filtro aplicado ao arquivo inteiro, e nao
+    apenas a pagina carregada na tela."""
+    root = request.args.get("root", "")
+    rel_path = request.args.get("file", "")
+    offset = request.args.get("offset", 0, type=int)
+    limit = request.args.get("limit", 500, type=int)
+    limit = max(1, min(limit, 20000))
+
+    try:
+        full_path, encoding, log_format = _resolve_log_file(root, rel_path)
+    except PathError as e:
+        return jsonify({"error": str(e)}), 400
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    try:
+        spec = analysis.FilterSpec(
+            levels=[v for v in request.args.get("levels", "").split(",") if v],
+            tag=request.args.get("tag") or None,
+            text=request.args.get("text") or None,
+            pid=request.args.get("pid") or None,
+            tid=request.args.get("tid") or None,
+            uid=request.args.get("uid") or None,
+            negate=request.args.get("negate", "false").lower() == "true",
+            case_sensitive=request.args.get("case", "false").lower() == "true",
+        )
+    except re.error as e:
+        return jsonify({"error": f"Regex invalida: {e}"}), 400
+
+    if spec.empty:
+        return jsonify({"error": "Informe ao menos um criterio de filtro."}), 400
+
+    try:
+        result = analysis.read_filtered(
+            full_path, encoding, log_format, spec, offset=offset, limit=limit)
+    except OSError as e:
+        return jsonify({"error": f"Erro lendo arquivo: {e}"}), 500
+
+    result["columns"] = columns_for(result["lines"], log_format)
+    result["path"] = rel_path
+    result["format"] = log_format
+    result["total_lines"] = count_lines(full_path)
+    return jsonify(result)
+
+
+@api.get("/glossary")
+def get_glossary():
+    """Siglas de log do Android (PID, TID, UID, niveis, AMS/WMS/PMS, ANR, OOM...)."""
+    return jsonify(glossary.as_dict())
 
 
 @api.get("/device_info")

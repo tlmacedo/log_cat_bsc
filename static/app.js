@@ -281,6 +281,21 @@ function newTab(path) {
     searchIdx: -1,
     hlIdx: null,
     jumpLine: null,
+    // Analises do arquivo inteiro, carregadas sob demanda.
+    timeline: null,
+    timelineLoading: false,
+    procMap: null,
+    procUids: null,
+    procAmbiguous: null,
+    procLoading: false,
+    // Filtro no servidor: quando ligado, a pagina exibida ja vem filtrada.
+    serverFilter: false,
+    serverMatched: 0,
+    serverTruncated: false,
+    // Intervalo de tempo marcado a partir de duas linhas selecionadas.
+    timeRange: null,
+    // Blocos de stack trace abertos (por padrao ficam dobrados).
+    openTraces: new Set(),
   };
 }
 
@@ -465,6 +480,8 @@ async function loadFileContent(tab, { tail = false, offset = 0, limit = null, sc
   recomputeSearch(tab);
   renderPanels();
   renderHighlightList();
+  // O nome do processo por PID e util em toda linha; busca uma vez por arquivo.
+  loadProcessMap(tab);
   setStatus(`${tab.path.split("/").pop()}: linhas ${fmtNum(tab.offset + 1)}-` +
     `${fmtNum(tab.offset + tab.lines.length)} de ${fmtNum(tab.totalLines)}` +
     (tab.format ? ` | formato ${tab.format}` : ""));
@@ -571,10 +588,15 @@ function savedFilterMatches(filter, line) {
 function visibleLines(tab) {
   const terms = parseLiveFilter(tab.liveFilter, false);
   const filter = state.savedFilters.find((f) => f.id === tab.activeFilterId) || null;
+  const range = tab.timeRange;
   const out = [];
   for (const line of tab.lines) {
     const c = line.c;
 
+    if (range) {
+      const v = timeValue(c && c.time);
+      if (v === null || v < range.from || v > range.to) continue;
+    }
     if (tab.levels.size) {
       if (!c || !tab.levels.has(c.level)) continue;
     }
@@ -666,39 +688,119 @@ function decorateText(text, tab) {
   return html + escapeHtml(text.slice(pos));
 }
 
+// ---------------------------------------------------------------------------
+// Agrupamento de stack traces
+// ---------------------------------------------------------------------------
+
+const TRACE_START = /FATAL EXCEPTION|\*\*\* \*\*\* \*\*\*|Fatal signal /;
+// Continuacoes tipicas de um stack trace Java ou de um tombstone nativo.
+const TRACE_CONT = /^\s*(?:at\s|Caused by:|Suppressed:|\.\.\.\s*\d+\s*more|#\d{2}\s+pc\s|backtrace:|[a-zA-Z_$][\w$.]*(?:Exception|Error)(?::|$)|\w+ \d+ \(|Process:|java\.|android\.|kotlin\.|com\.|org\.|libc |signal \d+)/;
+const TRACE_TAGS = new Set(["AndroidRuntime", "DEBUG", "System.err", "art", "libc", "CRASH"]);
+
+/** Marca cada linha visivel com o grupo de stack trace a que pertence.
+ *  Devolve Map<linha, {id, head, size}> — head e a primeira linha do bloco. */
+function groupTraces(lines) {
+  const groups = new Map();
+  let current = null;
+  for (const line of lines) {
+    const c = line.c;
+    const body = c ? (c.msg || "") : line.text;
+    const isHead = c ? TRACE_START.test(body) : TRACE_START.test(line.text);
+
+    if (isHead) {
+      current = { id: "g" + line.n, headLine: line.n, pid: c && c.pid, tid: c && c.tid, size: 1 };
+      groups.set(line.n, { group: current, head: true });
+      continue;
+    }
+    if (!current) continue;
+
+    // Continua o bloco enquanto for da mesma thread e parecer parte da pilha.
+    const sameThread = !c || !current.pid || (c.pid === current.pid && c.tid === current.tid);
+    const looksLikeFrame = TRACE_CONT.test(body) || (c && TRACE_TAGS.has(c.tag));
+    if (sameThread && looksLikeFrame) {
+      current.size++;
+      groups.set(line.n, { group: current, head: false });
+    } else {
+      current = null;
+    }
+  }
+  // Um "bloco" de uma linha so nao vale colapsar.
+  for (const [n, info] of groups) {
+    if (info.group.size < 2) groups.delete(n);
+  }
+  return groups;
+}
+
 function isHighlighted(tab, line) {
   const c = line.c;
   if (!c) return false;
   return (c.tag && tab.highlightTags.has(c.tag)) || (c.pid && tab.highlightPids.has(c.pid));
 }
 
-function rowHtml(tab, line) {
+function rowHtml(tab, line, groups) {
   const c = line.c;
   const classes = ["lvl-" + (c && c.level ? c.level : "none")];
   if (tab.selected.has(line.n)) classes.push("selected");
   if (isHighlighted(tab, line)) classes.push("highlighted");
   if (tab.bookmarks.has(line.n)) classes.push("bookmarked");
 
+  // Bloco de stack trace: a primeira linha vira cabecalho dobravel e as demais
+  // ficam escondidas enquanto o bloco estiver fechado.
+  let groupAttrs = "";
+  let toggle = "";
+  const g = groups && groups.get(line.n);
+  if (g) {
+    const collapsed = !tab.openTraces.has(g.group.id);
+    groupAttrs = ` data-group="${g.group.id}"`;
+    if (g.head) {
+      classes.push("trace-head");
+      toggle = `<span class="trace-toggle" data-group="${g.group.id}">` +
+        `${collapsed ? "▸" : "▾"} ${g.group.size}</span>`;
+    } else {
+      classes.push("trace-member");
+      if (collapsed) classes.push("trace-hidden");
+    }
+  }
+
   if (!c) {
     // Linha fora do formato logcat (cabecalho de bugreport, dumpsys, etc):
     // mostra o texto cru ocupando as colunas de conteudo.
-    return `<tr class="${classes.join(" ")}" data-line="${line.n}">` +
+    return `<tr class="${classes.join(" ")}" data-line="${line.n}"${groupAttrs}>` +
       `<td class="c-n">${line.n}</td>` +
       `<td class="c-lvl"></td><td class="c-time"></td><td class="c-pid"></td>` +
       `<td class="c-tid"></td><td class="c-tag"></td>` +
-      `<td class="c-text c-raw">${decorateText(line.text, tab)}</td></tr>`;
+      `<td class="c-text c-raw">${toggle}${decorateText(line.text, tab)}</td></tr>`;
   }
+
+  // Nome do processo ao lado do PID: "3154" sozinho nao diz nada.
+  const proc = processName(tab, c.pid);
+  const pidCell = decorateText(c.pid || "", tab) +
+    (proc ? ` <span class="proc-name">${escapeHtml(shortProc(proc))}</span>` : "");
+  const pidTitle = proc
+    ? ` title="PID ${c.pid} - ${escapeHtml(proc)}${tab.procAmbiguous && tab.procAmbiguous.has(c.pid) ? " (PID reutilizado na captura)" : ""}"`
+    : "";
+
+  // A TAG ganha a explicacao da sigla quando e um servico conhecido do sistema.
+  const tagInfo = glossaryTagTitle(c.tag);
+
   // Os destaques valem para qualquer coluna textual: quem destaca uma TAG ou um
   // PID espera ver a marcacao onde o valor aparece, nao so na mensagem.
-  return `<tr class="${classes.join(" ")}" data-line="${line.n}"` +
+  return `<tr class="${classes.join(" ")}" data-line="${line.n}"${groupAttrs}` +
     ` data-tag="${escapeHtml(c.tag || "")}" data-pid="${escapeHtml(c.pid || "")}">` +
     `<td class="c-n">${line.n}</td>` +
-    `<td class="c-lvl">${escapeHtml(c.level || "")}</td>` +
+    `<td class="c-lvl"${levelTitle(c.level)}>${escapeHtml(c.level || "")}</td>` +
     `<td class="c-time">${decorateText(c.time || "", tab)}</td>` +
-    `<td class="c-pid">${decorateText(c.pid || "", tab)}</td>` +
+    `<td class="c-pid"${pidTitle}>${pidCell}</td>` +
     `<td class="c-tid">${decorateText(c.tid || "", tab)}</td>` +
-    `<td class="c-tag">${decorateText(c.tag || "", tab)}</td>` +
-    `<td class="c-text">${decorateText(c.msg ?? line.text, tab)}</td></tr>`;
+    `<td class="c-tag"${tagInfo}>${decorateText(c.tag || "", tab)}</td>` +
+    `<td class="c-text">${toggle}${decorateText(c.msg ?? line.text, tab)}</td></tr>`;
+}
+
+/** "com.google.android.gms" ocupa muito espaco na coluna; mostra o essencial. */
+function shortProc(name) {
+  if (name.length <= 24) return name;
+  const parts = name.split(".");
+  return parts.length > 2 ? "…" + parts.slice(-2).join(".") : name.slice(0, 24) + "…";
 }
 
 function renderPanels() {
@@ -776,19 +878,30 @@ function buildPanel(tab, paneIndex) {
       <input type="checkbox" data-act="wrap"${tab.wrapText ? " checked" : ""}> Quebrar linha
     </label>
     <button data-act="export" title="Exportar as linhas visiveis (ou a selecao) para arquivo">Exportar</button>
+    <label class="toolbar-check" title="Aplicar o filtro ao arquivo inteiro no servidor, em vez de so a pagina carregada">
+      <input type="checkbox" data-act="server"${tab.serverFilter ? " checked" : ""}> Arquivo todo
+    </label>
     <button data-act="reset" title="Limpar todos os filtros e destaques">Limpar filtros</button>
     <span class="info"></span>
   `;
   panel.appendChild(toolbar);
+  panel.appendChild(buildTimeline(tab));
 
   const info = toolbar.querySelector(".info");
   const hidden = tab.lines.length - shown.length;
   info.textContent =
     `${fmtNum(shown.length)} linha(s)` +
     (hidden > 0 ? ` (${fmtNum(hidden)} ocultada(s) por filtro)` : "") +
-    ` | ${fmtNum(tab.offset + 1)}-${fmtNum(tab.offset + tab.lines.length)} de ${fmtNum(tab.totalLines)}` +
+    (tab.serverFilter
+      ? ` | ${fmtNum(tab.serverMatched)} no arquivo todo${tab.serverTruncated ? "+" : ""}` +
+        ` | pagina ${fmtNum(tab.offset + 1)}-${fmtNum(tab.offset + tab.lines.length)}`
+      : ` | ${fmtNum(tab.offset + 1)}-${fmtNum(tab.offset + tab.lines.length)} de ${fmtNum(tab.totalLines)}`) +
     (tab.size != null ? ` | ${fmtSize(tab.size)}` : "") +
     (tab.searchHits.length ? ` | ${tab.searchHits.length} ocorrencia(s)` : "");
+
+  // Barra de intervalo: aparece com duas ou mais linhas selecionadas.
+  const rangeBar = buildRangeBar(tab);
+  if (rangeBar) panel.appendChild(rangeBar);
 
   if (tab.error) {
     const err = document.createElement("div");
@@ -805,17 +918,152 @@ function buildPanel(tab, paneIndex) {
   } else if (!shown.length) {
     wrap.innerHTML = `<div class="empty-state">Nenhuma linha para exibir${tab.lines.length ? " com os filtros atuais" : ""}.</div>`;
   } else {
+    const groups = groupTraces(shown);
+    const th = (label, sigla) => {
+      const e = glossaryEntry(sigla);
+      return `<th${e ? ` title="${escapeHtml(`${e.sigla} - ${e.nome}: ${e.desc}`)}"` : ""}>${label}</th>`;
+    };
     wrap.innerHTML =
       `<table class="log-table${tab.wrapText ? " wrap" : ""}"><thead><tr>` +
-      '<th class="c-n">Linha</th><th>L.</th><th>Hora</th><th>PID</th><th>TID</th><th>Tag</th><th>Texto</th>' +
+      '<th class="c-n">Linha</th>' + th("L.", "L.") + th("Hora", "Hora") +
+      th("PID", "PID") + th("TID", "TID") + th("Tag", "Tag") + "<th>Texto</th>" +
       "</tr></thead><tbody>" +
-      shown.map((l) => rowHtml(tab, l)).join("") +
+      shown.map((l) => rowHtml(tab, l, groups)).join("") +
       "</tbody></table>";
   }
   panel.appendChild(wrap);
 
   wirePanel(tab, panel, toolbar, wrap, shown, paneIndex);
   return panel;
+}
+
+/** Mostra o intervalo entre a primeira e a ultima linha selecionada, com o
+ *  delta em tempo — a pergunta mais comum e "o que rolou nos 2s antes disso". */
+function buildRangeBar(tab) {
+  if (tab.timeRange) {
+    const bar = document.createElement("div");
+    bar.className = "range-bar active";
+    bar.innerHTML = `<span>Intervalo ativo: ${escapeHtml(tab.timeRange.fromLabel)} ate ` +
+      `${escapeHtml(tab.timeRange.toLabel)} (${fmtDelta(tab.timeRange.to - tab.timeRange.from)})</span>` +
+      `<button data-act="clear-range">Remover intervalo</button>`;
+    bar.querySelector("[data-act=clear-range]").addEventListener("click", () => {
+      tab.timeRange = null;
+      recomputeSearch(tab);
+      refreshPanel(tab);
+    });
+    return bar;
+  }
+
+  if (tab.selected.size < 2) return null;
+  const stamps = tab.lines
+    .filter((l) => tab.selected.has(l.n) && l.c && l.c.time)
+    .map((l) => ({ v: timeValue(l.c.time), label: l.c.time, n: l.n }))
+    .filter((s) => s.v !== null)
+    .sort((a, b) => a.v - b.v);
+  if (stamps.length < 2) return null;
+
+  const first = stamps[0];
+  const last = stamps[stamps.length - 1];
+  const bar = document.createElement("div");
+  bar.className = "range-bar";
+  bar.innerHTML =
+    `<span>${fmtNum(tab.selected.size)} linhas selecionadas | ` +
+    `L${fmtNum(first.n)} ${escapeHtml(first.label)} &rarr; L${fmtNum(last.n)} ${escapeHtml(last.label)} | ` +
+    `<strong>${fmtDelta(last.v - first.v)}</strong></span>` +
+    `<button data-act="apply-range">Filtrar so este intervalo</button>`;
+  bar.querySelector("[data-act=apply-range]").addEventListener("click", () => {
+    tab.timeRange = {
+      from: first.v, to: last.v,
+      fromLabel: first.label, toLabel: last.label,
+    };
+    recomputeSearch(tab);
+    refreshPanel(tab);
+    setStatus(`Intervalo de ${fmtDelta(last.v - first.v)} aplicado.`);
+  });
+  return bar;
+}
+
+function fmtDelta(ms) {
+  if (ms < 1000) return `${ms} ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(3)} s`;
+  const m = Math.floor(ms / 60000);
+  return `${m}min ${((ms % 60000) / 1000).toFixed(1)}s`;
+}
+
+/** Traduz o filtro ao vivo e os toggles em parametros para /api/filtered. */
+function serverFilterParams(tab) {
+  const params = new URLSearchParams({ root: state.root, file: tab.path });
+  const terms = parseLiveFilter(tab.liveFilter, false);
+  const byField = { tag: [], msg: [], pid: [], tid: [], uid: [] };
+  let negate = false;
+  for (const term of terms) {
+    if (term.negate) { negate = true; continue; }
+    const field = term.field || "msg";
+    if (byField[field]) byField[field].push(term.re.source);
+  }
+  const join = (arr) => (arr.length ? arr.map((s) => `(?:${s})`).join(".*") : "");
+  if (byField.tag.length) params.set("tag", join(byField.tag));
+  if (byField.msg.length) params.set("text", join(byField.msg));
+  if (byField.pid.length) params.set("pid", join(byField.pid));
+  if (byField.tid.length) params.set("tid", join(byField.tid));
+  if (byField.uid.length) params.set("uid", join(byField.uid));
+  if (tab.levels.size) params.set("levels", [...tab.levels].join(","));
+
+  const filter = state.savedFilters.find((f) => f.id === tab.activeFilterId);
+  if (filter) {
+    if (filter.tag) params.set("tag", filter.tag);
+    if (filter.text) params.set("text", filter.text);
+    if (filter.pid) params.set("pid", filter.pid);
+    if (filter.tid) params.set("tid", filter.tid);
+    if (filter.levels && filter.levels.length) params.set("levels", filter.levels.join(","));
+    if (filter.negate) params.set("negate", "true");
+    if (filter.caseSensitive) params.set("case", "true");
+  }
+  return { params, hasCriteria: [...params.keys()].length > 2, negateIgnored: negate && !filter };
+}
+
+async function loadServerFiltered(tab, offset = 0) {
+  const { params, hasCriteria, negateIgnored } = serverFilterParams(tab);
+  if (!hasCriteria) {
+    setStatus("Defina um filtro (nivel, tag:, text:, pid:...) para buscar no arquivo todo.", true);
+    tab.serverFilter = false;
+    refreshPanel(tab);
+    return;
+  }
+  params.set("offset", offset);
+  params.set("limit", tab.limit);
+
+  setStatus("Filtrando o arquivo inteiro...");
+  try {
+    const res = await fetch(`/api/filtered?${params}`);
+    const data = await res.json();
+    if (!res.ok) {
+      setStatus(data.error || "Erro no filtro.", true);
+      tab.serverFilter = false;
+      refreshPanel(tab);
+      return;
+    }
+    tab.lines = data.lines.map((text, i) => ({
+      n: data.line_numbers[i],
+      text,
+      c: (data.columns || [])[i] || null,
+    }));
+    tab.offset = data.offset;
+    tab.hasMore = data.has_more;
+    tab.serverMatched = data.matched;
+    tab.serverTruncated = data.truncated;
+    tab.totalLines = data.total_lines || tab.totalLines;
+    tab.selected.clear();
+    tab.hlIdx = null;
+    recomputeSearch(tab);
+    refreshPanel(tab);
+    renderHighlightList();
+    setStatus(`${fmtNum(data.matched)} linha(s) casam no arquivo inteiro` +
+      (data.truncated ? " (limite de varredura atingido)" : "") +
+      (negateIgnored ? " | termos negados ('-') so valem na pagina carregada" : ""));
+  } catch (err) {
+    setStatus("Falha na requisicao: " + err, true);
+  }
 }
 
 function wirePanel(tab, panel, toolbar, wrap, shown, paneIndex) {
@@ -836,9 +1084,13 @@ function wirePanel(tab, panel, toolbar, wrap, shown, paneIndex) {
     clearTimeout(debounce);
     debounce = setTimeout(() => {
       tab.liveFilter = liveInput.value;
+      if (tab.serverFilter) {
+        loadServerFiltered(tab, 0);
+        return;
+      }
       recomputeSearch(tab);
       refreshPanel(tab);
-    }, 180);
+    }, 250);
   });
 
   toolbar.querySelectorAll(".level-toggle").forEach((btn) => {
@@ -846,21 +1098,34 @@ function wirePanel(tab, panel, toolbar, wrap, shown, paneIndex) {
       const lvl = btn.dataset.level;
       if (tab.levels.has(lvl)) tab.levels.delete(lvl);
       else tab.levels.add(lvl);
+      if (tab.serverFilter) {
+        loadServerFiltered(tab, 0);
+        return;
+      }
       recomputeSearch(tab);
       refreshPanel(tab);
     });
   });
 
   const act = (name) => toolbar.querySelector(`[data-act="${name}"]`);
-  act("start").addEventListener("click", () => loadFileContent(tab, { offset: 0 }));
-  act("tail").addEventListener("click", () => loadFileContent(tab, { tail: true }));
-  act("prev").addEventListener("click", () =>
-    loadFileContent(tab, { offset: Math.max(0, tab.offset - tab.limit) }));
-  act("next").addEventListener("click", () =>
-    loadFileContent(tab, { offset: tab.offset + tab.limit }));
+  // No modo "arquivo todo" a paginacao percorre o resultado filtrado.
+  const goTo = (offset) => tab.serverFilter
+    ? loadServerFiltered(tab, offset)
+    : loadFileContent(tab, { offset });
+  act("start").addEventListener("click", () => goTo(0));
+  act("tail").addEventListener("click", () => tab.serverFilter
+    ? goTo(Math.max(0, tab.serverMatched - tab.limit))
+    : loadFileContent(tab, { tail: true }));
+  act("prev").addEventListener("click", () => goTo(Math.max(0, tab.offset - tab.limit)));
+  act("next").addEventListener("click", () => goTo(tab.offset + tab.limit));
   act("pagesize").addEventListener("change", (e) => {
     tab.limit = Number(e.target.value);
-    loadFileContent(tab, { offset: tab.offset });
+    goTo(tab.offset);
+  });
+  act("server").addEventListener("change", (e) => {
+    tab.serverFilter = e.target.checked;
+    if (tab.serverFilter) loadServerFiltered(tab, 0);
+    else loadFileContent(tab, { offset: 0 });
   });
   act("find").addEventListener("click", () => promptSearch(tab));
   act("prevhit").addEventListener("click", () => stepSearch(tab, -1));
@@ -876,6 +1141,15 @@ function wirePanel(tab, panel, toolbar, wrap, shown, paneIndex) {
   if (!tbody) return;
 
   tbody.addEventListener("click", (e) => {
+    // Abrir/fechar um bloco de stack trace nao mexe na selecao.
+    const toggle = e.target.closest(".trace-toggle");
+    if (toggle) {
+      const id = toggle.dataset.group;
+      if (tab.openTraces.has(id)) tab.openTraces.delete(id);
+      else tab.openTraces.add(id);
+      refreshPanel(tab);
+      return;
+    }
     const tr = e.target.closest("tr[data-line]");
     if (!tr) return;
     const n = Number(tr.dataset.line);
@@ -1465,6 +1739,225 @@ filterDialog.addEventListener("click", (e) => {
 renderFilterList();
 
 // ---------------------------------------------------------------------------
+// Glossario de siglas (PID, TID, UID, niveis, AMS/WMS/PMS, ANR, OOM...)
+// ---------------------------------------------------------------------------
+
+let glossaryData = null;
+
+async function ensureGlossary() {
+  if (glossaryData) return glossaryData;
+  try {
+    const res = await fetch("/api/glossary");
+    if (res.ok) glossaryData = await res.json();
+  } catch { /* sem glossario a tabela continua funcionando */ }
+  return glossaryData;
+}
+ensureGlossary().then(() => {
+  const tab = activeTab();
+  if (tab) refreshPanel(tab);
+});
+
+function glossaryEntry(sigla) {
+  if (!glossaryData) return null;
+  return glossaryData.entries.find((e) => e.sigla === sigla) || null;
+}
+
+function levelTitle(level) {
+  const e = level && glossaryEntry(level);
+  return e ? ` title="${escapeHtml(`${e.sigla} - ${e.nome}: ${e.desc}`)}"` : "";
+}
+
+/** Dica da coluna Tag quando a TAG e um servico conhecido (AMS, WMS, PMS...). */
+function glossaryTagTitle(tag) {
+  if (!tag || !glossaryData) return "";
+  const sigla = glossaryData.tag_index[tag];
+  if (!sigla) return "";
+  const e = glossaryEntry(sigla);
+  return e ? ` title="${escapeHtml(`${e.sigla} (${e.nome}): ${e.desc}`)}"` : "";
+}
+
+const glossaryDialog = el("#glossaryDialog");
+
+async function openGlossary() {
+  await ensureGlossary();
+  glossaryDialog.hidden = false;
+  renderGlossary();
+  el("#glossarySearch").focus();
+}
+
+function renderGlossary() {
+  const body = el("#glossaryBody");
+  if (!glossaryData) {
+    body.textContent = "Glossario indisponivel.";
+    return;
+  }
+  const q = el("#glossarySearch").value.trim().toLowerCase();
+  const parts = [];
+  for (const [gid, label] of Object.entries(glossaryData.groups)) {
+    const rows = glossaryData.entries.filter((e) =>
+      e.group === gid &&
+      (!q || e.sigla.toLowerCase().includes(q) || e.nome.toLowerCase().includes(q) ||
+        e.desc.toLowerCase().includes(q) || e.tags.some((t) => t.toLowerCase().includes(q))));
+    if (!rows.length) continue;
+    parts.push(`<h3 class="gl-group">${escapeHtml(label)}</h3>` +
+      rows.map((e) =>
+        `<div class="gl-item"><div class="gl-head"><code>${escapeHtml(e.sigla)}</code>` +
+        `<strong>${escapeHtml(e.nome)}</strong></div>` +
+        `<p>${escapeHtml(e.desc)}</p>` +
+        (e.tags.length
+          ? `<p class="gl-tags">TAGs no log: ${e.tags.map((t) =>
+              `<code>${escapeHtml(t)}</code>`).join(" ")}</p>`
+          : "") +
+        `</div>`).join(""));
+  }
+  body.innerHTML = parts.length ? parts.join("") : '<p class="gl-empty">Nada encontrado.</p>';
+}
+
+el("#glossaryBtn").addEventListener("click", openGlossary);
+el("#glossaryClose").addEventListener("click", () => { glossaryDialog.hidden = true; });
+el("#glossarySearch").addEventListener("input", renderGlossary);
+glossaryDialog.addEventListener("click", (e) => {
+  if (e.target === glossaryDialog) glossaryDialog.hidden = true;
+});
+
+// ---------------------------------------------------------------------------
+// Linha do tempo: mapa de calor do arquivo inteiro
+// ---------------------------------------------------------------------------
+
+const EVENT_STYLE = {
+  crash: { label: "Crash Java", color: "#dc2626" },
+  anr: { label: "ANR", color: "#b91c1c" },
+  native: { label: "Crash nativo", color: "#7f1d1d" },
+  watchdog: { label: "Watchdog", color: "#a21caf" },
+  oom: { label: "Falta de memoria", color: "#c2410c" },
+  boot: { label: "Boot", color: "#2563eb" },
+};
+
+async function loadTimeline(tab) {
+  if (tab.timeline || tab.timelineLoading) return;
+  tab.timelineLoading = true;
+  refreshPanel(tab);
+  try {
+    const params = new URLSearchParams({ root: state.root, file: tab.path, buckets: 600 });
+    const res = await fetch(`/api/timeline?${params}`);
+    const data = await res.json();
+    if (!res.ok) {
+      setStatus(data.error || "Erro montando a linha do tempo.", true);
+      return;
+    }
+    tab.timeline = data;
+    const total = data.events.length;
+    setStatus(total
+      ? `Linha do tempo pronta: ${total} evento(s) notavel(is) no arquivo.`
+      : "Linha do tempo pronta: nenhum crash, ANR ou watchdog encontrado.");
+  } catch (err) {
+    setStatus("Falha na requisicao: " + err, true);
+  } finally {
+    tab.timelineLoading = false;
+    refreshPanel(tab);
+  }
+}
+
+/** Barra que representa o arquivo inteiro: altura = volume de erros na faixa,
+ *  marcas verticais = crashes, ANRs e afins. Clicar navega ate a faixa. */
+function buildTimeline(tab) {
+  const box = document.createElement("div");
+  box.className = "timeline";
+
+  if (!tab.timeline) {
+    box.innerHTML = tab.timelineLoading
+      ? '<div class="timeline-hint">Analisando o arquivo inteiro...</div>'
+      : '<button class="timeline-load">Mostrar linha do tempo do arquivo</button>';
+    const btn = box.querySelector(".timeline-load");
+    if (btn) btn.addEventListener("click", () => loadTimeline(tab));
+    return box;
+  }
+
+  const buckets = tab.timeline.buckets;
+  const worst = Math.max(1, ...buckets.map((b) =>
+    (b.levels.E || 0) + (b.levels.F || 0) + (b.levels.W || 0)));
+
+  const bars = buckets.map((b) => {
+    const err = (b.levels.E || 0) + (b.levels.F || 0);
+    const warn = b.levels.W || 0;
+    const height = Math.round(((err + warn) / worst) * 100);
+    const kinds = Object.keys(b.events);
+    const evColor = kinds.length ? EVENT_STYLE[kinds[0]].color : null;
+    const title = `linhas ${fmtNum(b.start_line)}-${fmtNum(b.end_line)}` +
+      (b.first_time ? ` | ${b.first_time}` : "") +
+      ` | ${err} erro(s), ${warn} aviso(s)` +
+      (kinds.length ? ` | ${kinds.map((k) => EVENT_STYLE[k].label).join(", ")}` : "");
+    return `<div class="tl-bar" data-line="${b.start_line}" title="${escapeHtml(title)}">` +
+      `<i style="height:${height}%;background:${err ? "var(--lvl-E)" : "var(--lvl-W)"}"></i>` +
+      (evColor ? `<b style="background:${evColor}"></b>` : "") +
+      `</div>`;
+  }).join("");
+
+  // Posicao da janela carregada dentro do arquivo.
+  const total = Math.max(1, tab.totalLines);
+  const left = (tab.offset / total) * 100;
+  const width = Math.max(0.4, (tab.lines.length / total) * 100);
+
+  box.innerHTML =
+    `<div class="tl-track">${bars}<div class="tl-window" style="left:${left}%;width:${width}%"></div></div>` +
+    `<div class="tl-events"></div>`;
+
+  box.querySelector(".tl-track").addEventListener("click", (e) => {
+    const bar = e.target.closest(".tl-bar");
+    if (!bar) return;
+    const line = Number(bar.dataset.line);
+    loadFileContent(tab, { offset: Math.max(0, line - 1), scrollToLine: line });
+  });
+
+  // Lista compacta dos eventos, para pular direto ao crash.
+  const evBox = box.querySelector(".tl-events");
+  const events = tab.timeline.events;
+  if (!events.length) {
+    evBox.innerHTML = '<span class="timeline-hint">Nenhum crash, ANR ou watchdog no arquivo.</span>';
+  } else {
+    evBox.innerHTML = events.slice(0, 60).map((e, i) =>
+      `<button class="tl-event" data-i="${i}" style="border-color:${EVENT_STYLE[e.kind].color}" ` +
+      `title="${escapeHtml(`linha ${e.line} | ${e.text}`)}">` +
+      `${EVENT_STYLE[e.kind].label} <span class="tl-ev-line">L${fmtNum(e.line)}</span></button>`).join("") +
+      (events.length > 60 ? `<span class="timeline-hint">+${events.length - 60} evento(s)</span>` : "");
+    evBox.querySelectorAll(".tl-event").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const e = events[Number(btn.dataset.i)];
+        jumpToLine(tab, e.line);
+      });
+    });
+  }
+  return box;
+}
+
+// ---------------------------------------------------------------------------
+// Mapa PID -> processo
+// ---------------------------------------------------------------------------
+
+async function loadProcessMap(tab) {
+  if (tab.procMap || tab.procLoading) return;
+  tab.procLoading = true;
+  try {
+    const params = new URLSearchParams({ root: state.root, file: tab.path });
+    const res = await fetch(`/api/process_map?${params}`);
+    const data = await res.json();
+    if (!res.ok) return;
+    tab.procMap = data.pids || {};
+    tab.procUids = data.uids || {};
+    tab.procAmbiguous = new Set(data.ambiguous || []);
+    if (data.count) {
+      setStatus(`${data.count} PID(s) vinculados ao nome do processo.`);
+      refreshPanel(tab);
+    }
+  } catch { /* o nome do processo e um extra; sem ele a coluna PID segue util */ }
+  finally { tab.procLoading = false; }
+}
+
+function processName(tab, pid) {
+  return (tab.procMap && tab.procMap[pid]) || null;
+}
+
+// ---------------------------------------------------------------------------
 // Aba lateral: Destaques (varias palavras coloridas, com navegacao)
 // ---------------------------------------------------------------------------
 
@@ -1622,6 +2115,131 @@ el("#hlFromSelBtn").addEventListener("click", () => {
 });
 
 renderHighlightList();
+
+// ---------------------------------------------------------------------------
+// Sessao: guardar e retomar a analise inteira
+// ---------------------------------------------------------------------------
+
+const SESSION_VERSION = 1;
+
+function exportSession() {
+  if (!state.tabs.length && !state.savedFilters.length && !state.highlights.length) {
+    setStatus("Nada para salvar ainda.", true);
+    return;
+  }
+  const session = {
+    version: SESSION_VERSION,
+    saved_at: new Date().toISOString(),
+    root: state.root,
+    theme: document.documentElement.dataset.theme,
+    paneCount: state.paneCount,
+    syncTime: state.syncTime,
+    savedFilters: state.savedFilters,
+    highlights: state.highlights,
+    // panes guarda o caminho, nao o id: os ids sao recriados ao abrir.
+    panes: state.panes.slice(0, state.paneCount).map((id) => {
+      const t = state.tabs.find((x) => x.id === id);
+      return t ? t.path : null;
+    }),
+    tabs: state.tabs.map((t) => ({
+      path: t.path,
+      offset: t.offset,
+      limit: t.limit,
+      wrapText: t.wrapText,
+      liveFilter: t.liveFilter,
+      serverFilter: t.serverFilter,
+      levels: [...t.levels],
+      showTags: [...t.showTags], hideTags: [...t.hideTags],
+      showPids: [...t.showPids], hidePids: [...t.hidePids],
+      highlightTags: [...t.highlightTags], highlightPids: [...t.highlightPids],
+      bookmarks: [...t.bookmarks],
+      timeRange: t.timeRange,
+      activeFilterId: t.activeFilterId,
+    })),
+  };
+  const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
+  downloadText(`logviewer-sessao-${stamp}.json`, JSON.stringify(session, null, 2));
+  setStatus(`Sessao salva: ${session.tabs.length} aba(s), ${session.highlights.length} destaque(s).`);
+}
+
+async function importSession(file) {
+  let session;
+  try {
+    session = JSON.parse(await file.text());
+  } catch (err) {
+    setStatus("Arquivo de sessao invalido: " + err, true);
+    return;
+  }
+  if (!session || !Array.isArray(session.tabs)) {
+    setStatus("Arquivo de sessao invalido.", true);
+    return;
+  }
+
+  if (session.theme) applyTheme(session.theme);
+  if (Array.isArray(session.savedFilters)) state.savedFilters = session.savedFilters;
+  if (Array.isArray(session.highlights)) state.highlights = session.highlights;
+  state.paneCount = session.paneCount || 1;
+  state.syncTime = session.syncTime !== false;
+  el("#paneCount").value = String(state.paneCount);
+  el("#syncTime").checked = state.syncTime;
+  persist(FILTERS_KEY, state.savedFilters);
+  persist(HIGHLIGHTS_KEY, state.highlights);
+
+  if (session.root) {
+    state.root = session.root;
+    el("#rootInput").value = session.root;
+    await loadRoot();
+  }
+
+  state.tabs = [];
+  state.panes = [null, null, null];
+  const byPath = new Map();
+  for (const saved of session.tabs) {
+    const tab = newTab(saved.path);
+    tab.limit = saved.limit || DEFAULT_PAGE_SIZE;
+    tab.wrapText = !!saved.wrapText;
+    tab.liveFilter = saved.liveFilter || "";
+    tab.serverFilter = !!saved.serverFilter;
+    tab.activeFilterId = saved.activeFilterId || null;
+    tab.timeRange = saved.timeRange || null;
+    for (const [key, values] of Object.entries({
+      levels: saved.levels, showTags: saved.showTags, hideTags: saved.hideTags,
+      showPids: saved.showPids, hidePids: saved.hidePids,
+      highlightTags: saved.highlightTags, highlightPids: saved.highlightPids,
+      bookmarks: saved.bookmarks,
+    })) {
+      for (const v of values || []) tab[key].add(v);
+    }
+    state.tabs.push(tab);
+    byPath.set(saved.path, tab);
+  }
+  (session.panes || []).forEach((path, i) => {
+    const tab = path && byPath.get(path);
+    if (tab) state.panes[i] = tab.id;
+  });
+  state.activeTab = state.tabs.length ? (state.panes[0] || state.tabs[0].id) : null;
+
+  renderTabs();
+  renderFilterList();
+  renderHighlightList();
+  // Recarrega o conteudo de cada aba na posicao em que a sessao foi salva.
+  for (const saved of session.tabs) {
+    const tab = byPath.get(saved.path);
+    if (!tab) continue;
+    if (tab.serverFilter) await loadServerFiltered(tab, saved.offset || 0);
+    else await loadFileContent(tab, { offset: saved.offset || 0 });
+  }
+  renderPanels();
+  setStatus(`Sessao restaurada: ${state.tabs.length} aba(s).`);
+}
+
+el("#sessionSaveBtn").addEventListener("click", exportSession);
+el("#sessionLoadBtn").addEventListener("click", () => el("#sessionFile").click());
+el("#sessionFile").addEventListener("change", (e) => {
+  const file = e.target.files[0];
+  if (file) importSession(file);
+  e.target.value = "";
+});
 
 // ---------------------------------------------------------------------------
 // Atalhos globais

@@ -316,6 +316,64 @@ button.on-toggle { background: var(--accent); color: var(--accent-fg); border-co
 .level-toggle.on[data-level="E"] { background: #dc2626; }
 .level-toggle.on[data-level="F"] { background: #7f1d1d; }
 
+/* ---- Linha do tempo (mapa de calor do arquivo inteiro) ---- */
+.timeline {
+  flex: 0 0 auto;
+  background: var(--bg-alt);
+  border-bottom: 1px solid var(--border-soft);
+  padding: 3px 6px;
+}
+.timeline-load { font-size: 11px; padding: 2px 8px; }
+.timeline-hint { font-size: 11px; color: var(--fg-dim); }
+.tl-track {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  gap: 0;
+  height: 34px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-soft);
+  border-radius: 3px;
+  cursor: pointer;
+  overflow: hidden;
+}
+.tl-bar { flex: 1 1 0; min-width: 1px; height: 100%; position: relative; display: flex; align-items: flex-end; }
+.tl-bar:hover { background: var(--bg-hover); }
+.tl-bar i { display: block; width: 100%; min-height: 1px; }
+/* Marca de evento notavel (crash, ANR, watchdog) no topo da faixa. */
+.tl-bar b { position: absolute; top: 0; left: 0; right: 0; height: 5px; }
+.tl-window {
+  position: absolute;
+  top: 0; bottom: 0;
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border-left: 1px solid var(--accent);
+  border-right: 1px solid var(--accent);
+  pointer-events: none;
+}
+.tl-events { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; align-items: center; }
+.tl-event {
+  font-size: 10.5px;
+  padding: 0 6px;
+  border-left-width: 3px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+.tl-ev-line { color: var(--fg-dim); }
+
+/* ---- Barra de intervalo de tempo ---- */
+.range-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 8px;
+  font-size: 11px;
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-alt));
+  border-bottom: 1px solid var(--border-soft);
+}
+.range-bar.active { background: color-mix(in srgb, var(--lvl-W) 18%, var(--bg-alt)); }
+.range-bar button { font-size: 11px; padding: 1px 8px; }
+
 /* ---- Tabela de log ---- */
 .log-wrap { flex: 1; overflow: auto; background: var(--bg-panel); min-height: 0; }
 /* Sem quebra de linha o texto rola na horizontal, como no app de referencia;
@@ -358,6 +416,27 @@ button.on-toggle { background: var(--accent); color: var(--accent-fg); border-co
 .log-table tbody tr.highlighted td { color: inherit; }
 .log-table tbody tr.bookmarked td.c-n { background: var(--row-bookmark); font-weight: 700; }
 .log-table tbody tr.selected.highlighted { background: var(--row-selected); }
+
+/* Nome do processo ao lado do PID. */
+.proc-name { color: var(--accent); font-size: 10.5px; }
+tr.selected .proc-name { color: inherit; opacity: .8; }
+
+/* Blocos de stack trace dobrados. */
+.trace-toggle {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 5px;
+  border-radius: 3px;
+  background: var(--bg-header);
+  color: var(--fg-dim);
+  cursor: pointer;
+  user-select: none;
+  font-size: 10.5px;
+}
+.trace-toggle:hover { background: var(--accent); color: var(--accent-fg); }
+tr.trace-head td { border-top: 1px solid var(--lvl-E); }
+tr.trace-member td.c-text { padding-left: 22px; opacity: .92; }
+tr.trace-hidden { display: none; }
 
 .c-n { color: var(--fg-dim); text-align: right; user-select: none; }
 .c-lvl { text-align: center; font-weight: 700; width: 1.6em; }
@@ -520,6 +599,34 @@ mark.hl-7, .hl-chip.hl-7, .hl-swatch.hl-7 { background: #fcc2d7; color: #1a1a1a;
   word-break: break-word;
   user-select: text;
 }
+/* ---- Glossario ---- */
+.glossary-body { white-space: normal; font-family: inherit; }
+.gl-group {
+  margin: 14px 0 6px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--fg-dim);
+  border-bottom: 1px solid var(--border-soft);
+  padding-bottom: 3px;
+}
+.gl-group:first-child { margin-top: 0; }
+.gl-item { padding: 6px 0; border-bottom: 1px dotted var(--border-soft); }
+.gl-head { display: flex; align-items: baseline; gap: 8px; }
+.gl-head code {
+  background: var(--bg-header);
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-family: var(--mono);
+  min-width: 3.5em;
+  text-align: center;
+}
+.gl-item p { margin: 3px 0 0; font-size: 12px; line-height: 1.5; }
+.gl-tags { color: var(--fg-dim); font-size: 11px !important; }
+.gl-tags code { font-family: var(--mono); background: var(--bg-alt); padding: 0 4px; border-radius: 2px; }
+.gl-empty { color: var(--fg-dim); }
+#glossarySearch { font-size: 12px; }
+
 .dialog-form { padding: 10px; display: flex; flex-direction: column; gap: 8px; overflow: auto; }
 .dialog-form label { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--fg-dim); }
 .dialog-form label input[type="text"], .dialog-form label input:not([type]) { font-size: 12px; color: var(--fg); }
