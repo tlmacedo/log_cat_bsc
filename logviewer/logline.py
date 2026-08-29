@@ -84,7 +84,8 @@ _BUFFER_MARKER = re.compile(r"^-+\s*beginning of (?P<buffer>\S+)", re.IGNORECASE
 
 MAX_FIELD_SCAN_LINES = 300_000
 MAX_DISTINCT_VALUES = 300
-FORMAT_SAMPLE_LINES = 4000
+FORMAT_SCAN_LINES = 400_000
+FORMAT_ENOUGH_MATCHES = 200
 
 _EMPTY = {
     "time": None, "uid": None, "pid": None, "tid": None,
@@ -133,18 +134,28 @@ def buffer_marker(line):
     return m.group("buffer") if m else None
 
 
-def detect_format(path, encoding, sample_lines=FORMAT_SAMPLE_LINES):
-    """Le o inicio do arquivo e devolve o formato de logcat dominante, ou None
-    se o arquivo nao parecer logcat."""
+def detect_format(path, encoding, max_lines=FORMAT_SCAN_LINES,
+                  enough=FORMAT_ENOUGH_MATCHES):
+    """Descobre o formato de logcat dominante do arquivo, ou None se ele nao
+    parecer logcat.
+
+    A busca nao pode parar nas primeiras linhas: num bugreport o logcat so
+    comeca depois de dezenas de milhares de linhas de cabecalho, propriedades e
+    dumpsys. Antes disso a deteccao devolvia None e cada linha do arquivo
+    passava a tentar os nove padroes, o que deixava toda leitura e filtro
+    varias vezes mais lentos. Entao varremos ate juntar `enough` linhas
+    reconhecidas, e so desistimos depois de `max_lines`."""
     counts = Counter()
+    found = 0
     try:
         with open(path, "r", encoding=encoding, errors="replace", newline="") as f:
             for i, raw in enumerate(f):
-                if i >= sample_lines:
+                if i >= max_lines or found >= enough:
                     break
                 parsed = parse_logcat_line(raw.rstrip("\n").rstrip("\r"))
                 if parsed:
                     counts[parsed["fmt"]] += 1
+                    found += 1
     except OSError:
         return None
     if not counts:

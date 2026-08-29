@@ -330,7 +330,7 @@ button.on-toggle { background: var(--accent); color: var(--accent-fg); border-co
   display: flex;
   align-items: flex-end;
   gap: 0;
-  height: 34px;
+  height: 64px;
   background: var(--bg-panel);
   border: 1px solid var(--border-soft);
   border-radius: 3px;
@@ -350,7 +350,17 @@ button.on-toggle { background: var(--accent); color: var(--accent-fg); border-co
   border-right: 1px solid var(--accent);
   pointer-events: none;
 }
-.tl-events { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; align-items: center; }
+/* A lista de eventos rola em vez de empurrar a tabela de log para baixo: num
+   arquivo grande sao dezenas de chips e eles tomariam a tela inteira. */
+.tl-events {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+  align-items: center;
+  max-height: 48px;
+  overflow-y: auto;
+}
 .tl-event {
   font-size: 10.5px;
   padding: 0 6px;
@@ -458,14 +468,14 @@ mark.hit { outline: 1px dotted var(--fg-dim); }
 /* Paleta dos destaques de palavra. As cores tem o texto fixado em preto porque
    os fundos sao claros nos dois temas — e assim o destaque continua legivel
    sobre linhas de qualquer nivel. */
-mark.hl-0, .hl-chip.hl-0, .hl-swatch.hl-0 { background: #ffe066; color: #1a1a1a; }
-mark.hl-1, .hl-chip.hl-1, .hl-swatch.hl-1 { background: #8ce99a; color: #1a1a1a; }
-mark.hl-2, .hl-chip.hl-2, .hl-swatch.hl-2 { background: #74c0fc; color: #1a1a1a; }
-mark.hl-3, .hl-chip.hl-3, .hl-swatch.hl-3 { background: #ffa8a8; color: #1a1a1a; }
-mark.hl-4, .hl-chip.hl-4, .hl-swatch.hl-4 { background: #d0bfff; color: #1a1a1a; }
-mark.hl-5, .hl-chip.hl-5, .hl-swatch.hl-5 { background: #ffc9a0; color: #1a1a1a; }
-mark.hl-6, .hl-chip.hl-6, .hl-swatch.hl-6 { background: #99e9f2; color: #1a1a1a; }
-mark.hl-7, .hl-chip.hl-7, .hl-swatch.hl-7 { background: #fcc2d7; color: #1a1a1a; }
+mark.hl-0, .hl-chip.hl-0, .hl-swatch.hl-0, .fd-term.hl-0 { background: #ffe066; color: #1a1a1a; }
+mark.hl-1, .hl-chip.hl-1, .hl-swatch.hl-1, .fd-term.hl-1 { background: #8ce99a; color: #1a1a1a; }
+mark.hl-2, .hl-chip.hl-2, .hl-swatch.hl-2, .fd-term.hl-2 { background: #74c0fc; color: #1a1a1a; }
+mark.hl-3, .hl-chip.hl-3, .hl-swatch.hl-3, .fd-term.hl-3 { background: #ffa8a8; color: #1a1a1a; }
+mark.hl-4, .hl-chip.hl-4, .hl-swatch.hl-4, .fd-term.hl-4 { background: #d0bfff; color: #1a1a1a; }
+mark.hl-5, .hl-chip.hl-5, .hl-swatch.hl-5, .fd-term.hl-5 { background: #ffc9a0; color: #1a1a1a; }
+mark.hl-6, .hl-chip.hl-6, .hl-swatch.hl-6, .fd-term.hl-6 { background: #99e9f2; color: #1a1a1a; }
+mark.hl-7, .hl-chip.hl-7, .hl-swatch.hl-7, .fd-term.hl-7 { background: #fcc2d7; color: #1a1a1a; }
 
 /* ---- Aba Destaques ---- */
 .hl-add { flex-direction: column; align-items: stretch; }
@@ -635,93 +645,7 @@ mark.hl-7, .hl-chip.hl-7, .hl-swatch.hl-7 { background: #fcc2d7; color: #1a1a1a;
 .dialog-label { font-size: 11px; color: var(--fg-dim); }
 .dialog-check { flex-direction: row !important; align-items: center; gap: 6px !important; color: var(--fg) !important; font-size: 12px !important; }
 
-/* ---- Painel de busca em arquivos (inalterado no comportamento) ---- */
-.find-panel {
-  position: fixed;
-  left: 0; right: 0; bottom: 0;
-  height: 320px;
-  z-index: 50;
-  display: flex;
-  flex-direction: column;
-  background: var(--bg-panel);
-  border-top: 1px solid var(--border);
-  box-shadow: 0 -4px 16px rgba(0,0,0,.2);
-}
-/* O atributo hidden precisa vencer o display:flex acima. */
-.find-panel[hidden] { display: none; }
-.find-panel.collapsed { height: auto !important; }
-.find-panel.collapsed .find-body, .find-panel.collapsed .find-results { display: none; }
-.find-resize-handle { height: 6px; cursor: row-resize; background: var(--bg-header); }
-.find-resize-handle::after {
-  content: "";
-  display: block;
-  width: 40px;
-  height: 2px;
-  margin: 2px auto;
-  background: var(--border);
-  border-radius: 2px;
-}
-.find-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 5px 8px;
-  background: var(--bg-header);
-  border-bottom: 1px solid var(--border-soft);
-}
-.find-header-actions { display: flex; gap: 4px; }
-.find-close { padding: 1px 7px; }
-.find-body { padding: 8px; display: flex; flex-direction: column; gap: 6px; }
-.find-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-.find-row #findPattern { flex: 1 1 320px; }
-.find-options { gap: 14px; font-size: 11px; }
-.find-scope { display: flex; gap: 10px; }
-.find-scope label, .find-check { display: flex; align-items: center; gap: 4px; }
-.find-folder-opts { flex: 1 1 260px; }
-.find-folder-opts input { width: 100%; }
-.find-advanced { border: 1px solid var(--border-soft); border-radius: 4px; padding: 4px 6px; }
-.find-advanced summary { cursor: pointer; font-size: 11px; color: var(--fg-dim); }
-.find-adv-body { display: flex; flex-direction: column; gap: 6px; padding-top: 6px; }
-.find-adv-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-.find-adv-row input { flex: 1 1 180px; }
-.find-adv-label { font-size: 11px; color: var(--fg-dim); }
-.find-fields-info { font-size: 10.5px; color: var(--fg-dim); }
-.find-level-chips { display: flex; gap: 4px; }
-.level-chip {
-  display: flex; align-items: center; gap: 3px;
-  padding: 1px 6px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  font-size: 11px;
-  cursor: pointer;
-}
-.level-chip.level-V { color: var(--lvl-V); }
-.level-chip.level-D { color: var(--lvl-D); }
-.level-chip.level-I { color: var(--lvl-I); }
-.level-chip.level-W { color: var(--lvl-W); }
-.level-chip.level-E { color: var(--lvl-E); }
-.level-chip.level-F { color: var(--lvl-F); }
-.find-summary { font-size: 11px; color: var(--fg-dim); }
-.find-summary.err { color: var(--lvl-E); }
-.find-load-all { align-self: flex-start; margin: 4px 8px; }
-.find-results { flex: 1; overflow: auto; font-family: var(--mono); font-size: 11.5px; }
-.find-file-group { border-bottom: 1px solid var(--border-soft); }
-.find-file-header {
-  padding: 4px 8px;
-  background: var(--bg-alt);
-  cursor: pointer;
-  font-family: system-ui, sans-serif;
-  font-size: 11.5px;
-  font-weight: 600;
-  position: sticky;
-  top: 0;
-}
-.find-file-header .count { color: var(--fg-dim); font-weight: 400; }
-.find-results .line { display: flex; gap: 8px; padding: 1px 8px; cursor: pointer; }
-.find-results .line:hover { background: var(--bg-hover); }
-.find-results .line .ln { color: var(--fg-dim); min-width: 70px; text-align: right; }
-.find-results .line .txt { white-space: pre-wrap; word-break: break-word; }
-.find-empty { padding: 10px; color: var(--fg-dim); }
+/* ---- Selo de nivel usado na janela de resultados ---- */
 .badge {
   display: inline-block;
   min-width: 14px;
@@ -739,3 +663,66 @@ mark.hl-7, .hl-chip.hl-7, .hl-swatch.hl-7 { background: #fcc2d7; color: #1a1a1a;
 .badge-W { background: #d97706; }
 .badge-E { background: #dc2626; }
 .badge-F, .badge-A { background: #7f1d1d; }
+
+/* ---- Janela de resultados da busca no arquivo inteiro ---- */
+.find-dock {
+  flex: 0 0 auto;
+  height: 240px;
+  display: flex;
+  flex-direction: column;
+  min-height: 90px;
+  background: var(--bg-panel);
+  border-top: 2px solid var(--border);
+}
+.fd-resize { height: 5px; cursor: row-resize; background: var(--bg-header); flex: 0 0 auto; }
+.fd-resize:hover { background: var(--accent); }
+.fd-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  background: var(--bg-alt);
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 11.5px;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+}
+.fd-head button { font-size: 11px; padding: 1px 7px; }
+.fd-err { color: var(--lvl-E); }
+.fd-spacer { flex: 1; }
+.fd-legend { display: flex; gap: 4px; flex-wrap: wrap; }
+.fd-term {
+  padding: 0 6px;
+  border-radius: 3px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+}
+.fd-list { flex: 1; overflow: auto; font-family: var(--mono); font-size: 11.5px; }
+.fd-row { display: flex; gap: 8px; padding: 1px 8px; cursor: pointer; white-space: pre; }
+.fd-row:hover { background: var(--bg-hover); }
+.fd-row.on { background: var(--row-selected); color: var(--row-selected-fg); }
+.fd-n { color: var(--fg-dim); min-width: 78px; text-align: right; user-select: none; }
+.fd-row.on .fd-n { color: inherit; }
+.fd-tag { color: var(--accent); margin-right: 8px; }
+.fd-row.on .fd-tag { color: inherit; }
+.fd-txt { flex: 1; min-width: 0; }
+.fd-empty { padding: 12px; color: var(--fg-dim); font-family: system-ui, sans-serif; }
+
+/* Cabecalho da linha do tempo, com o botao de fechar. */
+.tl-head { display: flex; align-items: center; gap: 8px; padding-bottom: 3px; }
+.tl-close { padding: 0 6px; line-height: 1.3; }
+
+/* Caixa "ir para a linha". */
+.goto-line { width: 74px; font-size: 11px; text-align: right; }
+
+/* Nome do arquivo nos resultados, quando a busca cobre varios arquivos. */
+.fd-file {
+  color: var(--accent);
+  min-width: 150px;
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+.fd-row.on .fd-file { color: inherit; }

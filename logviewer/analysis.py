@@ -270,8 +270,9 @@ class FilterSpec:
     """Filtro aplicavel linha a linha. Os campos de texto sao regex."""
 
     def __init__(self, levels=None, tag=None, text=None, pid=None, tid=None,
-                 uid=None, negate=False, case_sensitive=False):
+                 uid=None, raw=None, negate=False, case_sensitive=False):
         flags = 0 if case_sensitive else re.IGNORECASE
+        self.flags = flags
         self.levels = set(levels or ())
         self.negate = bool(negate)
         self.tag = re.compile(tag, flags) if tag else None
@@ -279,11 +280,46 @@ class FilterSpec:
         self.pid = re.compile(pid, flags) if pid else None
         self.tid = re.compile(tid, flags) if tid else None
         self.uid = re.compile(uid, flags) if uid else None
+        # `raw` casa com a linha inteira, incluindo hora, PID e TAG. E o que um
+        # termo digitado sem prefixo deve fazer: quem procura "Vold" espera
+        # achar tanto no texto quanto na TAG. Em um bugreport a maior parte das
+        # linhas nem e logcat, e so `raw` alcanca essas.
+        self.raw = re.compile(raw, flags) if raw else None
+        # Versao em bytes do padrao, usada quando o filtro so olha a linha crua:
+        # evita decodificar centenas de MB so para descartar a maioria das
+        # linhas. So vale para padroes ASCII, que e o caso de busca em log.
+        self.raw_bytes = None
+        self.raw_bytes_lower = None
+        if raw and raw.isascii():
+            try:
+                self.raw_bytes = re.compile(raw.encode("ascii"), flags)
+            except re.error:
+                self.raw_bytes = None
+            # Buscar sem diferenciar maiusculas custa caro: o motor de regex
+            # refaz o dobramento de caixa a cada caractere. Passar o bloco para
+            # minusculas de uma vez e comparar com o padrao ja minusculo e umas
+            # seis vezes mais rapido, e bytes.lower() preserva o tamanho, entao
+            # os deslocamentos continuam validos.
+            # So vale sem barra invertida no padrao: minusculizar trocaria \W
+            # por \w e mudaria o sentido.
+            if self.raw_bytes is not None and flags & re.IGNORECASE and "\\" not in raw:
+                try:
+                    self.raw_bytes_lower = re.compile(raw.lower().encode("ascii"))
+                except re.error:
+                    self.raw_bytes_lower = None
 
     @property
     def empty(self):
-        return not (self.levels or self.tag or self.text
+        return not (self.levels or self.tag or self.text or self.raw
                     or self.pid or self.tid or self.uid)
+
+    @property
+    def needs_parse(self):
+        """Se o filtro so olha a linha crua, da para pular o parse de logcat —
+        que e o maior custo da varredura, ainda mais em arquivo de formato misto
+        onde cada linha tenta os nove padroes antes de desistir."""
+        return bool(self.levels or self.tag or self.pid
+                    or self.tid or self.uid or self.text)
 
     def cache_key(self):
         return json.dumps({
@@ -293,8 +329,9 @@ class FilterSpec:
             "pid": self.pid.pattern if self.pid else None,
             "tid": self.tid.pattern if self.tid else None,
             "uid": self.uid.pattern if self.uid else None,
+            "raw": self.raw.pattern if self.raw else None,
             "negate": self.negate,
-            "flags": self.tag.flags if self.tag else 0,
+            "flags": self.flags,
         }, sort_keys=True)
 
     def matches(self, line, parsed):
@@ -302,6 +339,8 @@ class FilterSpec:
         return (not hit) if self.negate else hit
 
     def _raw_match(self, line, parsed):
+        if self.raw is not None and not self.raw.search(line):
+            return False
         if self.levels:
             if not parsed or parsed["level"] not in self.levels:
                 return False
@@ -319,6 +358,69 @@ class FilterSpec:
         return True
 
 
+SCAN_CHUNK = 8 << 20
+
+
+def _scan_raw_bytes(path, pattern, max_hits, lowered=None):
+    """Varre o arquivo em blocos grandes procurando o padrao, e devolve
+    (numero_da_linha, deslocamento_em_bytes) de cada linha que casa.
+
+    Uma regex por linha significaria milhoes de chamadas ao interpretador; aqui
+    cada bloco de 8 MB e percorrido de uma vez dentro do modulo `re`, e o numero
+    da linha sai de contagens de '\\n' feitas so ate o proximo acerto — barato
+    porque os acertos sao esparsos."""
+    hits = []
+    truncated = False
+    buf = b""
+    base = 0          # deslocamento, em bytes, do inicio de `buf` no arquivo
+    lines_done = 0    # linhas completas antes de `buf`
+
+    probe = lowered if lowered is not None else pattern
+
+    def harvest(block, block_base, lines_before):
+        """Acumula os acertos de um bloco terminado em '\\n'."""
+        nonlocal truncated
+        counted = 0          # posicao ate onde ja contamos '\n' neste bloco
+        line_no = lines_before
+        last_start = -1
+        for m in probe.finditer(block):
+            start = block.rfind(b"\n", 0, m.start()) + 1
+            if start == last_start:
+                continue     # outro acerto na mesma linha
+            line_no += block.count(b"\n", counted, start)
+            counted = start
+            last_start = start
+            hits.append((line_no + 1, block_base + start))
+            if len(hits) >= max_hits:
+                truncated = True
+                return
+        return
+
+    with open(path, "rb") as f:
+        while True:
+            data = f.read(SCAN_CHUNK)
+            if not data:
+                break
+            buf += data
+            cut = buf.rfind(b"\n")
+            if cut == -1:
+                continue     # linha maior que o bloco: acumula mais
+            block = buf[:cut + 1]
+            # lower() preserva o tamanho, entao '\n' e os deslocamentos ficam
+            # nos mesmos lugares e o bloco convertido serve para tudo.
+            harvest(block.lower() if lowered is not None else block, base, lines_done)
+            if truncated:
+                return hits, True
+            lines_done += block.count(b"\n")
+            base += len(block)
+            buf = buf[cut + 1:]
+
+    # Ultima linha sem quebra no final.
+    if buf and probe.search(buf.lower() if lowered is not None else buf):
+        hits.append((lines_done + 1, base))
+    return hits, truncated
+
+
 def filter_index(path, encoding, log_format, spec):
     """Numeros de linha e deslocamentos em bytes de tudo que casa com o filtro.
     Guardar o deslocamento permite paginar depois com um seek por linha, em vez
@@ -327,6 +429,15 @@ def filter_index(path, encoding, log_format, spec):
     cached = _filter_cache.get(key)
     if cached is not None:
         return cached
+
+    needs_parse = spec.needs_parse
+
+    # Caminho rapido: o filtro so procura texto na linha inteira, entao da para
+    # varrer os bytes em blocos, sem decodificar nem parsear nada.
+    if (not needs_parse) and spec.raw_bytes is not None and not spec.negate:
+        hits, truncated = _scan_raw_bytes(
+            path, spec.raw_bytes, MAX_FILTER_HITS, spec.raw_bytes_lower)
+        return _filter_cache.put(key, {"hits": hits, "truncated": truncated})
 
     hits = []
     truncated = False
@@ -339,7 +450,7 @@ def filter_index(path, encoding, log_format, spec):
                 truncated = True
                 break
             line = raw.decode(encoding, errors="replace").rstrip("\n").rstrip("\r")
-            parsed = parse_logcat_line(line, log_format)
+            parsed = parse_logcat_line(line, log_format) if needs_parse else None
             if spec.matches(line, parsed):
                 hits.append((i, start))
                 if len(hits) >= MAX_FILTER_HITS:
