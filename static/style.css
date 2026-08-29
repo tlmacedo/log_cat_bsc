@@ -330,7 +330,7 @@ button.on-toggle { background: var(--accent); color: var(--accent-fg); border-co
   display: flex;
   align-items: flex-end;
   gap: 0;
-  height: 34px;
+  height: 64px;
   background: var(--bg-panel);
   border: 1px solid var(--border-soft);
   border-radius: 3px;
@@ -350,7 +350,17 @@ button.on-toggle { background: var(--accent); color: var(--accent-fg); border-co
   border-right: 1px solid var(--accent);
   pointer-events: none;
 }
-.tl-events { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; align-items: center; }
+/* A lista de eventos rola em vez de empurrar a tabela de log para baixo: num
+   arquivo grande sao dezenas de chips e eles tomariam a tela inteira. */
+.tl-events {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+  align-items: center;
+  max-height: 48px;
+  overflow-y: auto;
+}
 .tl-event {
   font-size: 10.5px;
   padding: 0 6px;
