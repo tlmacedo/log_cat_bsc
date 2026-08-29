@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+<meta charset="utf-8">
+<title>Log Viewer</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="topbar">
+    <input id="rootInput" placeholder="Caminho da pasta de logs, ex: /Volumes/Development/SIDIA/log_cat_bsc/log">
+    <button id="loadBtn">Carregar pasta</button>
+    <button id="findInFilesBtn" title="Buscar (Ctrl+F)">Buscar</button>
+    <span id="status"></span>
+  </div>
+  <div id="main">
+    <div id="tree"></div>
+    <div id="content">
+      <div id="tabs"></div>
+      <div id="panels">
+        <div class="empty-state">Selecione uma pasta e clique em um arquivo de texto na arvore.</div>
+      </div>
+    </div>
+  </div>
+
+  <div id="findPanel" class="find-panel" hidden>
+    <div id="findResizeHandle" class="find-resize-handle" title="Arraste para redimensionar"></div>
+    <div class="find-header">
+      <strong>Buscar</strong>
+      <div class="find-header-actions">
+        <button id="findCollapseBtn" class="find-close" title="Colapsar/expandir painel">&#9662;</button>
+        <button id="findCloseBtn" class="find-close" title="Fechar (Esc)">&times;</button>
+      </div>
+    </div>
+    <div class="find-body">
+      <div class="find-row">
+        <input id="findPattern" list="searchHistoryList" placeholder="Localizar (regex), ex: ERROR|WARN|Exception">
+        <button id="findSearchBtn">Buscar</button>
+      </div>
+      <div class="find-row find-options">
+        <label class="find-check"><input type="checkbox" id="findCaseSensitive"> Diferenciar maiusculas/minusculas</label>
+        <div class="find-scope">
+          <label><input type="radio" name="findScope" value="current" checked> Arquivo atual</label>
+          <label><input type="radio" name="findScope" value="open"> Arquivos abertos</label>
+          <label><input type="radio" name="findScope" value="folder"> Pasta carregada</label>
+        </div>
+        <div id="findFolderOptions" class="find-folder-opts" hidden>
+          <input id="findGlob" placeholder="Filtro de nome, ex: *.log,*.txt (vazio = todos os arquivos de texto)">
+        </div>
+      </div>
+
+      <details class="find-advanced" open>
+        <summary>Busca avancada (por nivel, TAG, PID, UID/processo)</summary>
+        <div class="find-adv-body">
+          <div class="find-adv-row">
+            <span class="find-adv-label">Nivel</span>
+            <div id="findLevelChips" class="find-level-chips">
+              <label class="level-chip level-V"><input type="checkbox" value="V"> V</label>
+              <label class="level-chip level-D"><input type="checkbox" value="D"> D</label>
+              <label class="level-chip level-I"><input type="checkbox" value="I"> I</label>
+              <label class="level-chip level-W"><input type="checkbox" value="W"> W</label>
+              <label class="level-chip level-E"><input type="checkbox" value="E"> E</label>
+              <label class="level-chip level-F"><input type="checkbox" value="F"> F</label>
+            </div>
+            <button id="findRefreshFieldsBtn" type="button" title="Escanear o escopo atual em busca de TAGs/PIDs/UIDs reais">Atualizar campos</button>
+            <span id="findFieldsInfo" class="find-fields-info"></span>
+          </div>
+          <div class="find-adv-row">
+            <input id="findTag" list="findTagList" placeholder="TAG (ex: ActivityManager)">
+            <input id="findPid" list="findPidList" placeholder="PID (ex: 3154)">
+            <input id="findUid" list="findUidList" placeholder="UID/processo (ex: radio, system, 1000)">
+          </div>
+          <datalist id="findTagList"></datalist>
+          <datalist id="findPidList"></datalist>
+          <datalist id="findUidList"></datalist>
+        </div>
+      </details>
+
+      <div id="findSummary" class="find-summary"></div>
+    </div>
+    <div id="findResults" class="find-results"></div>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

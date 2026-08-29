@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Dados reais de bug report do dispositivo (grandes e potencialmente sensiveis) -
+# nao versionar; aponte a UI para uma pasta local de logs em tempo de uso.
+/log/
