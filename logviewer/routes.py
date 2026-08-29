@@ -1,3 +1,4 @@
+import json
 import os
 import re
 
@@ -199,20 +200,37 @@ def get_filtered():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
-    try:
-        spec = analysis.FilterSpec(
-            levels=[v for v in request.args.get("levels", "").split(",") if v],
-            tag=request.args.get("tag") or None,
-            text=request.args.get("text") or None,
-            pid=request.args.get("pid") or None,
-            tid=request.args.get("tid") or None,
-            uid=request.args.get("uid") or None,
-            raw=request.args.get("raw") or None,
-            negate=request.args.get("negate", "false").lower() == "true",
-            case_sensitive=request.args.get("case", "false").lower() == "true",
+    case_sensitive = request.args.get("case", "false").lower() == "true"
+
+    def build(src):
+        levels = src.get("levels")
+        if isinstance(levels, str):
+            levels = [v for v in levels.split(",") if v]
+        return analysis.FilterSpec(
+            levels=levels or None,
+            tag=src.get("tag") or None,
+            text=src.get("text") or None,
+            pid=src.get("pid") or None,
+            tid=src.get("tid") or None,
+            uid=src.get("uid") or None,
+            raw=src.get("raw") or None,
+            negate=str(src.get("negate", "")).lower() == "true",
+            case_sensitive=case_sensitive,
         )
-    except re.error as e:
-        return jsonify({"error": f"Regex invalida: {e}"}), 400
+
+    try:
+        # `groups` e uma lista JSON de nos combinados em OU, para consultas do
+        # tipo "esta TAG com estas palavras OU aquele PID com aquelas".
+        groups_raw = request.args.get("groups")
+        if groups_raw:
+            groups = json.loads(groups_raw)
+            if not isinstance(groups, list) or not groups:
+                return jsonify({"error": "Parametro 'groups' invalido."}), 400
+            spec = analysis.MultiSpec([build(g) for g in groups if isinstance(g, dict)])
+        else:
+            spec = build(request.args)
+    except (re.error, ValueError) as e:
+        return jsonify({"error": f"Filtro invalido: {e}"}), 400
 
     if spec.empty:
         return jsonify({"error": "Informe ao menos um criterio de filtro."}), 400

@@ -545,11 +545,25 @@ function scrollLogToLine(tab, lineNumber, paneIndex) {
 
 const FIELD_PREFIXES = {
   "pid:": "pid", "tid:": "tid", "tag:": "tag", "uid:": "uid",
-  "app:": "tag", "text:": "msg", "msg:": "msg",
+  "app:": "pid", "text:": "msg", "msg:": "msg",
   "level:": "level", "lvl:": "level",
 };
 
-function parseLiveFilter(query, caseSensitive) {
+/** Traduz `pid:` e `app:` para os PIDs de verdade.
+ *
+ *  Numero e usado como esta (casamento exato). Texto e procurado no mapa
+ *  PID -> processo: `pid:sbrows` acha o PID de com.sec.android.app.sbrowser.
+ *  Sem isso o usuario precisaria descobrir o numero antes de poder buscar. */
+function resolvePid(tab, value) {
+  if (/^\d+$/.test(value)) return { pattern: `^${value}$`, pids: [value], byName: false };
+  const map = (tab && tab.procMap) || {};
+  const re = safeRegex(value, false);
+  const pids = Object.keys(map).filter((pid) => re.test(map[pid]) || re.test(pid));
+  if (!pids.length) return { pattern: null, pids: [], byName: true };
+  return { pattern: `^(?:${pids.join("|")})$`, pids, byName: true };
+}
+
+function parseLiveFilter(query, caseSensitive, tab) {
   const terms = [];
   for (let raw of (query || "").trim().split(/\s+/)) {
     if (!raw) continue;
@@ -568,7 +582,18 @@ function parseLiveFilter(query, caseSensitive) {
       }
     }
     if (!value) continue;
-    terms.push({ field, negate, re: safeRegex(value, caseSensitive) });
+
+    if (field === "pid" || field === "tid") {
+      const r = resolvePid(tab, value);
+      terms.push({
+        field, negate, value,
+        re: safeRegex(r.pattern ?? "$^", caseSensitive),
+        pids: r.pids,
+        unresolved: r.byName && !r.pids.length,
+      });
+      continue;
+    }
+    terms.push({ field, negate, value, re: safeRegex(value, caseSensitive) });
   }
   return terms;
 }
@@ -578,17 +603,26 @@ const MAX_ACTIVE_TERMS = 24;
 /** Quebra uma busca nas palavras que a compoem, cada uma com sua cor.
  *  `start` continua a numeracao de cores de onde a secao anterior parou, para
  *  que buscas diferentes nao repitam cor. */
-function termsOf(query, start = 0) {
+function termsOf(query, start = 0, tab = null) {
   const out = [];
   let color = start;
-  for (const term of parseLiveFilter(query, false)) {
+  for (const term of parseLiveFilter(query, false, tab)) {
     if (term.negate) continue;   // termo negado nao pinta nada
+    // Para pid:/app: pinta o numero que foi resolvido, nao o texto digitado:
+    // "sbrows" nao aparece na linha, mas "10076" aparece.
+    if (term.pids && term.pids.length) {
+      for (const pid of term.pids.slice(0, 4)) {
+        out.push({ pattern: `\\b${pid}\\b`, label: pid, color: color % HL_COLORS });
+        color++;
+      }
+      continue;
+    }
     const src = term.re.source;
     // Um "a|b|c" simples vira uma cor por alternativa; com parenteses ou
     // colchetes o "|" pode ser interno ao regex, entao fica uma cor so.
     const parts = /[()[\]\\]/.test(src) ? [src] : src.split("|").filter(Boolean);
     for (const part of parts) {
-      out.push({ pattern: part, color: color % HL_COLORS });
+      out.push({ pattern: part, label: part, color: color % HL_COLORS });
       color++;
     }
   }
@@ -607,7 +641,7 @@ function activeTerms(tab) {
     out.push(t);
   };
   for (const section of tab.findSections || []) section.terms.forEach(push);
-  termsOf(tab.liveFilter, tab.colorCursor || 0).forEach(push);
+  termsOf(tab.liveFilter, tab.colorCursor || 0, tab).forEach(push);
   return out;
 }
 
@@ -627,24 +661,6 @@ function termMatches(term, line) {
   return term.re.test(subject);
 }
 
-function savedFilterMatches(filter, line) {
-  const c = line.c;
-  const cs = !!filter.caseSensitive;
-  if (filter.levels && filter.levels.length) {
-    if (!c || !filter.levels.includes(c.level)) return false;
-  }
-  const fields = [
-    ["tag", filter.tag], ["msg", filter.text],
-    ["pid", filter.pid], ["tid", filter.tid],
-  ];
-  for (const [name, pattern] of fields) {
-    if (!pattern) continue;
-    const re = safeRegex(pattern, cs);
-    const subject = name === "msg" && !c ? line.text : (c ? c[name] || "" : "");
-    if (!re.test(subject)) return false;
-  }
-  return true;
-}
 
 /** Linhas que a tabela de log mostra.
  *
@@ -654,7 +670,6 @@ function savedFilterMatches(filter, line) {
  *  esconde linha e o que veio do menu de contexto (mostrar/esconder TAG e PID),
  *  o filtro salvo e o intervalo de tempo, todos acoes explicitas de esconder. */
 function visibleLines(tab) {
-  const filter = state.savedFilters.find((f) => f.id === tab.activeFilterId) || null;
   const range = tab.timeRange;
   const out = [];
   for (const line of tab.lines) {
@@ -668,11 +683,6 @@ function visibleLines(tab) {
     if (c && tab.hideTags.has(c.tag)) continue;
     if (tab.showPids.size && (!c || !tab.showPids.has(c.pid))) continue;
     if (c && tab.hidePids.has(c.pid)) continue;
-
-    if (filter) {
-      const hit = savedFilterMatches(filter, line);
-      if (filter.negate ? hit : !hit) continue;
-    }
 
     out.push(line);
   }
@@ -1089,8 +1099,10 @@ function fileSearchParams(tab, query) {
   const bare = [];
   const byField = { tag: [], msg: [], pid: [], tid: [], uid: [] };
   let negated = 0;
-  for (const term of parseLiveFilter(query, false)) {
+  let unresolved = null;
+  for (const term of parseLiveFilter(query, false, tab)) {
     if (term.negate) { negated++; continue; }
+    if (term.unresolved) { unresolved = term.value; continue; }
     if (!term.field) bare.push(term.re.source);
     else byField[term.field].push(term.re.source);
   }
@@ -1102,7 +1114,7 @@ function fileSearchParams(tab, query) {
   if (byField.pid.length) params.set("pid", byField.pid.join("|"));
   if (byField.tid.length) params.set("tid", byField.tid.join("|"));
   if (byField.uid.length) params.set("uid", byField.uid.join("|"));
-  return { params, hasCriteria: [...params.keys()].length > 2, negated };
+  return { params, hasCriteria: [...params.keys()].length > 2, negated, unresolved };
 }
 
 /** Leva o foco para a caixa de busca do painel ativo (Ctrl+F / Ctrl+Shift+F). */
@@ -1162,24 +1174,32 @@ async function searchAcrossFiles(tab, query, scope) {
 
 /** Roda a busca e guarda o resultado como mais uma secao da janela de baixo.
  *  Buscar de novo o mesmo termo atualiza a secao existente em vez de duplicar. */
-async function runSearch(tab, query, { sectionId = null, offset = 0 } = {}) {
+async function runSearch(tab, query, { sectionId = null, offset = 0,
+                                        groups = null, filter = null } = {}) {
   query = (query ?? tab.liveFilter).trim();
   if (!query) {
     setStatus("Digite algo na caixa de busca.", true);
     return;
   }
-  const scope = tab.findScope || "current";
+  // Um filtro com nos sempre vale no arquivo atual: os nos falam de TAG/PID
+  // deste log.
+  const scope = groups ? "current" : (tab.findScope || "current");
 
   let section = sectionId
     ? tab.findSections.find((x) => x.id === sectionId)
     : tab.findSections.find((x) => x.query === query && x.scope === scope);
 
   if (!section) {
+    // As palavras coloridas de um filtro sao as palavras-chave dos seus nos.
+    const colorSource = filter
+      ? filterNodes(filter).map((n) => n.text).filter(Boolean).join(" ")
+      : query;
     section = {
       id: "s" + Date.now() + Math.random().toString(36).slice(2, 5),
       query,
       scope,
-      terms: termsOf(query, tab.colorCursor || 0),
+      groups,
+      terms: termsOf(colorSource, tab.colorCursor || 0, tab),
       results: null,
       collapsed: false,
       exportChecked: false,
@@ -1192,6 +1212,7 @@ async function runSearch(tab, query, { sectionId = null, offset = 0 } = {}) {
   } else {
     section.loading = true;
     section.error = null;
+    if (groups) section.groups = groups;
   }
 
   saveToHistory(query);
@@ -1200,7 +1221,18 @@ async function runSearch(tab, query, { sectionId = null, offset = 0 } = {}) {
 
   try {
     if (scope === "current") {
-      const { params, hasCriteria } = fileSearchParams(tab, query);
+      let params, hasCriteria = true, unresolved = null;
+      if (section.groups) {
+        params = new URLSearchParams({ root: state.root, file: tab.path });
+        params.set("groups", JSON.stringify(section.groups));
+      } else {
+        ({ params, hasCriteria, unresolved } = fileSearchParams(tab, query));
+      }
+      if (unresolved) {
+        section.error = `Nenhum processo casa com "${unresolved}". ` +
+          (tab.procMap ? "Veja os nomes na coluna PID." : "O mapa de processos ainda esta carregando.");
+        return;
+      }
       if (!hasCriteria) {
         section.error = "Consulta vazia.";
         return;
@@ -1260,9 +1292,28 @@ function markedRows(tab) {
 // Janela de resultados (fica no fluxo do painel, dividindo espaco com o log)
 // ---------------------------------------------------------------------------
 
+/** Distingue um clique de um arrasto para selecionar texto.
+ *
+ *  Sem isso, tentar selecionar um trecho de uma linha de resultado dispararia
+ *  a navegacao no meio da selecao. Guarda onde o botao desceu e trata como
+ *  clique so se o ponteiro praticamente nao andou e nada ficou selecionado. */
+function clickNotDrag(container, handler) {
+  let down = null;
+  container.addEventListener("mousedown", (e) => { down = [e.clientX, e.clientY]; });
+  container.addEventListener("click", (e) => {
+    const moved = down && (Math.abs(e.clientX - down[0]) > 4 || Math.abs(e.clientY - down[1]) > 4);
+    down = null;
+    // Arrastar (selecionar texto) ou dar duplo clique (selecionar palavra) nao
+    // navega. Um clique parado navega, mesmo que exista selecao anterior na
+    // tela — checar a selecao aqui travaria o clique seguinte.
+    if (moved || e.detail > 1) return;
+    handler(e);
+  });
+}
+
 function chipsHtml(section) {
   return section.terms.map((t) =>
-    `<span class="fd-term hl-${t.color}">${escapeHtml(t.pattern)}</span>`).join("");
+    `<span class="fd-term hl-${t.color}">${escapeHtml(t.label ?? t.pattern)}</span>`).join("");
 }
 
 function resultRowHtml(tab, section, i) {
@@ -1346,7 +1397,7 @@ function buildSection(tab, section) {
       });
     });
   });
-  list.addEventListener("click", (e) => {
+  clickNotDrag(list, (e) => {
     const row = e.target.closest(".fd-row");
     if (!row) return;
     box.querySelectorAll(".fd-row.on").forEach((n) => n.classList.remove("on"));
@@ -1408,7 +1459,7 @@ function buildMarkedSection(tab) {
     tab.bookmarks.clear();
     refreshPanel(tab);
   });
-  list.addEventListener("click", (e) => {
+  clickNotDrag(list, (e) => {
     const row = e.target.closest(".fd-row");
     if (row) openAtLine(tab, Number(row.dataset.line), null);
   });
@@ -1505,7 +1556,13 @@ async function exportChecked(tab) {
     let lines = section.results.lines;
     let numbers = section.results.numbers;
     if (section.scope === "current" && section.results.matched > lines.length) {
-      const { params } = fileSearchParams(tab, section.query);
+      let params;
+      if (section.groups) {
+        params = new URLSearchParams({ root: state.root, file: tab.path });
+        params.set("groups", JSON.stringify(section.groups));
+      } else {
+        ({ params } = fileSearchParams(tab, section.query));
+      }
       params.set("offset", 0);
       params.set("limit", 20000);
       try {
@@ -1612,7 +1669,7 @@ function wirePanel(tab, panel, toolbar, wrap, shown, paneIndex) {
   const tbody = wrap.querySelector("tbody");
   if (!tbody) return;
 
-  tbody.addEventListener("click", (e) => {
+  clickNotDrag(tbody, (e) => {
     // Abrir/fechar um bloco de stack trace nao mexe na selecao.
     const toggle = e.target.closest(".trace-toggle");
     if (toggle) {
@@ -2076,34 +2133,118 @@ function renderFilterList() {
   for (const f of state.savedFilters) {
     const li = document.createElement("li");
     li.className = state.selectedFilterId === f.id ? "selected" : "";
-    const bits = [];
-    if (f.levels && f.levels.length) bits.push(f.levels.join(""));
-    if (f.tag) bits.push("tag:" + f.tag);
-    if (f.text) bits.push("txt:" + f.text);
-    if (f.pid) bits.push("pid:" + f.pid);
-    if (f.tid) bits.push("tid:" + f.tid);
+    const nodes = filterNodes(f);
+    const bits = nodes.map((n) => [
+      n.levels && n.levels.length ? n.levels.join("") : "",
+      n.tag ? "tag:" + n.tag : "",
+      n.pid ? "pid:" + n.pid : "",
+      n.tid ? "tid:" + n.tid : "",
+      n.text || "",
+    ].filter(Boolean).join(" ")).join("  ou  ");
     li.innerHTML =
-      `<span class="filter-name">${f.negate ? '<span class="neg">!</span> ' : ""}${escapeHtml(f.name)}</span>` +
-      `<span class="filter-meta">${escapeHtml(bits.join(" ").slice(0, 40))}</span>`;
+      `<span class="filter-name">${escapeHtml(f.name)}</span>` +
+      `<span class="filter-meta">${nodes.length > 1 ? nodes.length + " nos: " : ""}` +
+      `${escapeHtml(bits.slice(0, 44))}</span>`;
     li.addEventListener("click", () => applySavedFilter(f.id));
     li.addEventListener("dblclick", () => openFilterDialog(f.id));
     filterListEl.appendChild(li);
   }
 }
 
+/** Converte os nos do filtro no payload que /api/filtered espera, resolvendo
+ *  nomes de processo em PIDs. */
+function filterGroups(tab, f) {
+  const groups = [];
+  let unresolved = null;
+  for (const node of filterNodes(f)) {
+    const g = {};
+    if (node.tag) g.tag = node.tag;
+    if (node.text) g.raw = node.text;
+    if (node.tid) g.tid = node.tid;
+    if (node.levels && node.levels.length) g.levels = node.levels.join(",");
+    if (node.pid) {
+      const r = resolvePid(tab, node.pid);
+      if (!r.pattern) { unresolved = node.pid; continue; }
+      g.pid = r.pattern;
+    }
+    if (Object.keys(g).length) groups.push(g);
+  }
+  return { groups, unresolved };
+}
+
+/** Aplicar um filtro salvo roda a busca e cria uma secao; o log nao muda. */
 function applySavedFilter(id) {
   const tab = activeTab();
-  // Clicar de novo no filtro ja ativo desliga-o.
-  const turningOff = state.selectedFilterId === id;
-  state.selectedFilterId = turningOff ? null : id;
-  if (tab) {
-    tab.activeFilterId = state.selectedFilterId;
-    recomputeSearch(tab);
-    refreshPanel(tab);
-  }
+  state.selectedFilterId = id;
   renderFilterList();
   const f = state.savedFilters.find((x) => x.id === id);
-  setStatus(turningOff ? "Filtro desativado." : `Filtro "${f ? f.name : id}" aplicado.`);
+  if (!f) return;
+  if (!tab) {
+    setStatus("Abra um arquivo antes de aplicar o filtro.", true);
+    return;
+  }
+  const { groups, unresolved } = filterGroups(tab, f);
+  if (!groups.length) {
+    setStatus(unresolved
+      ? `Nenhum processo casa com "${unresolved}".`
+      : "Filtro sem criterios.", true);
+    return;
+  }
+  runSearch(tab, f.name, { groups, filter: f });
+}
+
+/** Um filtro e uma lista de nos combinados em OU. Filtros antigos, de campo
+ *  unico, sao lidos como um no so. */
+function filterNodes(f) {
+  if (Array.isArray(f.nodes) && f.nodes.length) return f.nodes;
+  if (f.tag || f.text || f.pid || f.tid || (f.levels && f.levels.length)) {
+    return [{ tag: f.tag || "", text: f.text || "", pid: f.pid || "",
+              tid: f.tid || "", levels: f.levels || [] }];
+  }
+  return [{ tag: "", text: "", pid: "", tid: "", levels: [] }];
+}
+
+let fdNodes = [];
+
+function renderFilterNodes() {
+  const box = el("#fdNodes");
+  box.innerHTML = fdNodes.map((node, i) => `
+    <fieldset class="fd-node" data-i="${i}">
+      <legend>No ${i + 1}${i ? " &mdash; <em>ou</em>" : ""}
+        ${fdNodes.length > 1 ? '<button type="button" class="fd-node-del" title="Remover este no">&times;</button>' : ""}
+      </legend>
+      <div class="dialog-row">
+        <label>TAG <input data-f="tag" value="${escapeHtml(node.tag || "")}" placeholder="ex: Telecom"></label>
+        <label>PID ou app <input data-f="pid" value="${escapeHtml(node.pid || "")}" placeholder="ex: 3154 ou sbrowser"></label>
+        <label>TID <input data-f="tid" value="${escapeHtml(node.tid || "")}" placeholder="ex: 8144"></label>
+      </div>
+      <label>Palavras-chave <input data-f="text" value="${escapeHtml(node.text || "")}"
+        placeholder="ex: sales_code|carrierid|imei"></label>
+      <div class="dialog-row">
+        <span class="dialog-label">Niveis</span>
+        <div class="level-toggles" data-f="levels">
+          ${LEVELS.map((l) => `<button type="button" class="level-toggle${(node.levels || []).includes(l) ? " on" : ""}" data-level="${l}">${l}</button>`).join("")}
+        </div>
+      </div>
+    </fieldset>`).join("");
+
+  box.querySelectorAll(".fd-node").forEach((fs) => {
+    const i = Number(fs.dataset.i);
+    fs.querySelectorAll("input[data-f]").forEach((input) => {
+      input.addEventListener("input", () => { fdNodes[i][input.dataset.f] = input.value; });
+    });
+    fs.querySelectorAll(".level-toggle").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        btn.classList.toggle("on");
+        fdNodes[i].levels = [...fs.querySelectorAll(".level-toggle.on")].map((b) => b.dataset.level);
+      });
+    });
+    const del = fs.querySelector(".fd-node-del");
+    if (del) del.addEventListener("click", () => {
+      fdNodes.splice(i, 1);
+      renderFilterNodes();
+    });
+  });
 }
 
 function openFilterDialog(id) {
@@ -2111,21 +2252,17 @@ function openFilterDialog(id) {
   const f = state.savedFilters.find((x) => x.id === id) || {};
   el("#filterDialogTitle").textContent = id ? "Editar filtro" : "Novo filtro";
   el("#fdName").value = f.name || "";
-  el("#fdTag").value = f.tag || "";
-  el("#fdText").value = f.text || "";
-  el("#fdPid").value = f.pid || "";
-  el("#fdTid").value = f.tid || "";
-  el("#fdNegate").checked = !!f.negate;
   el("#fdCase").checked = !!f.caseSensitive;
-  const levels = new Set(f.levels || []);
-  el("#fdLevels").innerHTML = LEVELS.map((l) =>
-    `<button type="button" class="level-toggle${levels.has(l) ? " on" : ""}" data-level="${l}">${l}</button>`).join("");
-  el("#fdLevels").querySelectorAll(".level-toggle").forEach((btn) => {
-    btn.addEventListener("click", () => btn.classList.toggle("on"));
-  });
+  fdNodes = filterNodes(f).map((n) => ({ ...n, levels: [...(n.levels || [])] }));
+  renderFilterNodes();
   filterDialog.hidden = false;
   el("#fdName").focus();
 }
+
+el("#fdAddNode").addEventListener("click", () => {
+  fdNodes.push({ tag: "", text: "", pid: "", tid: "", levels: [] });
+  renderFilterNodes();
+});
 
 el("#filterAddBtn").addEventListener("click", () => openFilterDialog(null));
 el("#filterEditBtn").addEventListener("click", () => {
@@ -2172,9 +2309,8 @@ el("#filterImportFile").addEventListener("change", async (e) => {
       state.savedFilters.push({
         id: "f" + Date.now() + Math.random().toString(36).slice(2, 6),
         name: f.name,
-        tag: f.tag || "", text: f.text || "", pid: f.pid || "", tid: f.tid || "",
-        levels: Array.isArray(f.levels) ? f.levels : [],
-        negate: !!f.negate, caseSensitive: !!f.caseSensitive,
+        nodes: filterNodes(f),
+        caseSensitive: !!f.caseSensitive,
       });
       added++;
     }
@@ -2194,23 +2330,25 @@ el("#fdSave").addEventListener("click", () => {
     el("#fdName").focus();
     return;
   }
-  const data = {
-    name,
-    tag: el("#fdTag").value.trim(),
-    text: el("#fdText").value.trim(),
-    pid: el("#fdPid").value.trim(),
-    tid: el("#fdTid").value.trim(),
-    levels: [...el("#fdLevels").querySelectorAll(".level-toggle.on")].map((b) => b.dataset.level),
-    negate: el("#fdNegate").checked,
-    caseSensitive: el("#fdCase").checked,
-  };
+  const nodes = fdNodes
+    .map((n) => ({
+      tag: (n.tag || "").trim(), text: (n.text || "").trim(),
+      pid: (n.pid || "").trim(), tid: (n.tid || "").trim(),
+      levels: n.levels || [],
+    }))
+    .filter((n) => n.tag || n.text || n.pid || n.tid || n.levels.length);
+  if (!nodes.length) {
+    setStatus("Preencha ao menos um campo em algum no.", true);
+    return;
+  }
+  const data = { name, nodes, caseSensitive: el("#fdCase").checked };
   const existing = state.savedFilters.find((x) => x.id === state.editingFilterId);
   if (existing) Object.assign(existing, data);
   else state.savedFilters.push({ id: "f" + Date.now() + Math.random().toString(36).slice(2, 6), ...data });
   filterDialog.hidden = true;
   saveFilters();
   const tab = activeTab();
-  if (tab && tab.activeFilterId) refreshPanel(tab);
+  if (tab) refreshPanel(tab);
 });
 
 const closeFilterDialog = () => { filterDialog.hidden = true; };

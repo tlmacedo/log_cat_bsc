@@ -127,27 +127,20 @@
     </div>
   </div>
 
-  <!-- Editor de filtro salvo -->
+  <!-- Editor de filtro composto: varios nos combinados em OU -->
   <div id="filterDialog" class="dialog-backdrop" hidden>
-    <div class="dialog dialog-narrow">
+    <div class="dialog">
       <header>
         <strong id="filterDialogTitle">Novo filtro</strong>
         <button id="filterDialogClose" class="icon-btn">&times;</button>
       </header>
       <div class="dialog-form">
-        <label>Nome <input id="fdName" placeholder="ex: Erros do meu app"></label>
-        <label>TAG <input id="fdTag" placeholder="regex, ex: ActivityManager|Vold"></label>
-        <label>Texto da mensagem <input id="fdText" placeholder="regex, ex: Exception|timeout"></label>
-        <div class="dialog-row">
-          <label>PID <input id="fdPid" placeholder="ex: 3154"></label>
-          <label>TID <input id="fdTid" placeholder="ex: 4048"></label>
-        </div>
-        <div class="dialog-row">
-          <span class="dialog-label">Niveis</span>
-          <div id="fdLevels" class="level-toggles"></div>
-        </div>
-        <label class="dialog-check"><input type="checkbox" id="fdNegate">
-          Negar (esconder as linhas que casarem &mdash; <em>is not</em>)</label>
+        <label>Nome <input id="fdName" placeholder="ex: Telecom e sbrowser na ativacao"></label>
+        <p class="dialog-hint">O filtro casa a linha se <strong>qualquer</strong> um dos nos
+        casar. Dentro de um no, os campos preenchidos precisam casar todos.
+        Em PID vale o numero ou o nome do processo (ex: <code>sbrowser</code>).</p>
+        <div id="fdNodes" class="fd-nodes"></div>
+        <button id="fdAddNode" type="button">+ Adicionar no</button>
         <label class="dialog-check"><input type="checkbox" id="fdCase"> Diferenciar maiusculas/minusculas</label>
       </div>
       <footer>

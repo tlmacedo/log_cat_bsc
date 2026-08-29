@@ -421,6 +421,51 @@ def _scan_raw_bytes(path, pattern, max_hits, lowered=None):
     return hits, truncated
 
 
+class MultiSpec:
+    """Varios filtros em OU: a linha entra se casar com qualquer um dos nos.
+
+    E o que permite montar uma consulta do tipo "TAG Telecom com estas palavras
+    OU o PID do sbrowser com aquelas", que nenhum filtro de campo unico
+    consegue expressar."""
+
+    def __init__(self, specs):
+        self.specs = [s for s in specs if not s.empty]
+
+    @property
+    def empty(self):
+        return not self.specs
+
+    @property
+    def needs_parse(self):
+        return any(s.needs_parse for s in self.specs)
+
+    def cache_key(self):
+        return json.dumps(["OR"] + [s.cache_key() for s in self.specs], sort_keys=True)
+
+    def matches(self, line, parsed):
+        return any(s.matches(line, parsed) for s in self.specs)
+
+    def prefilter(self):
+        """Regex em bytes que qualquer linha aceitavel obrigatoriamente casa.
+
+        So existe se todo no tiver um padrao de texto: basta um no sem texto
+        (por exemplo, so `tag:`) para que qualquer linha seja candidata e a
+        triagem perca o sentido. Serve para nao parsear o arquivo inteiro
+        quando os acertos sao esparsos, que e o caso normal."""
+        parts = []
+        for spec in self.specs:
+            probe = spec.raw or spec.text
+            if probe is None or spec.negate or not probe.pattern.isascii():
+                return None
+            parts.append(f"(?:{probe.pattern})")
+        if not parts:
+            return None
+        try:
+            return re.compile("|".join(parts).encode("ascii"), re.IGNORECASE)
+        except re.error:
+            return None
+
+
 def filter_index(path, encoding, log_format, spec):
     """Numeros de linha e deslocamentos em bytes de tudo que casa com o filtro.
     Guardar o deslocamento permite paginar depois com um seek por linha, em vez
@@ -434,9 +479,24 @@ def filter_index(path, encoding, log_format, spec):
 
     # Caminho rapido: o filtro so procura texto na linha inteira, entao da para
     # varrer os bytes em blocos, sem decodificar nem parsear nada.
-    if (not needs_parse) and spec.raw_bytes is not None and not spec.negate:
+    if (not needs_parse) and getattr(spec, "raw_bytes", None) is not None and not spec.negate:
         hits, truncated = _scan_raw_bytes(
             path, spec.raw_bytes, MAX_FILTER_HITS, spec.raw_bytes_lower)
+        return _filter_cache.put(key, {"hits": hits, "truncated": truncated})
+
+    # Filtro composto: faz a triagem nos bytes e so decodifica e parseia as
+    # linhas candidatas, que costumam ser uma fracao minima do arquivo.
+    probe = spec.prefilter() if isinstance(spec, MultiSpec) else None
+    if probe is not None:
+        candidates, truncated = _scan_raw_bytes(path, probe, MAX_FILTER_HITS)
+        hits = []
+        with open(path, "rb") as f:
+            for line_no, byte_off in candidates:
+                f.seek(byte_off)
+                line = f.readline().decode(encoding, errors="replace").rstrip("\n").rstrip("\r")
+                parsed = parse_logcat_line(line, log_format) if needs_parse else None
+                if spec.matches(line, parsed):
+                    hits.append((line_no, byte_off))
         return _filter_cache.put(key, {"hits": hits, "truncated": truncated})
 
     hits = []
