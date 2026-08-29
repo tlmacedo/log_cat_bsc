@@ -458,14 +458,14 @@ mark.hit { outline: 1px dotted var(--fg-dim); }
 /* Paleta dos destaques de palavra. As cores tem o texto fixado em preto porque
    os fundos sao claros nos dois temas — e assim o destaque continua legivel
    sobre linhas de qualquer nivel. */
-mark.hl-0, .hl-chip.hl-0, .hl-swatch.hl-0 { background: #ffe066; color: #1a1a1a; }
-mark.hl-1, .hl-chip.hl-1, .hl-swatch.hl-1 { background: #8ce99a; color: #1a1a1a; }
-mark.hl-2, .hl-chip.hl-2, .hl-swatch.hl-2 { background: #74c0fc; color: #1a1a1a; }
-mark.hl-3, .hl-chip.hl-3, .hl-swatch.hl-3 { background: #ffa8a8; color: #1a1a1a; }
-mark.hl-4, .hl-chip.hl-4, .hl-swatch.hl-4 { background: #d0bfff; color: #1a1a1a; }
-mark.hl-5, .hl-chip.hl-5, .hl-swatch.hl-5 { background: #ffc9a0; color: #1a1a1a; }
-mark.hl-6, .hl-chip.hl-6, .hl-swatch.hl-6 { background: #99e9f2; color: #1a1a1a; }
-mark.hl-7, .hl-chip.hl-7, .hl-swatch.hl-7 { background: #fcc2d7; color: #1a1a1a; }
+mark.hl-0, .hl-chip.hl-0, .hl-swatch.hl-0, .fd-term.hl-0 { background: #ffe066; color: #1a1a1a; }
+mark.hl-1, .hl-chip.hl-1, .hl-swatch.hl-1, .fd-term.hl-1 { background: #8ce99a; color: #1a1a1a; }
+mark.hl-2, .hl-chip.hl-2, .hl-swatch.hl-2, .fd-term.hl-2 { background: #74c0fc; color: #1a1a1a; }
+mark.hl-3, .hl-chip.hl-3, .hl-swatch.hl-3, .fd-term.hl-3 { background: #ffa8a8; color: #1a1a1a; }
+mark.hl-4, .hl-chip.hl-4, .hl-swatch.hl-4, .fd-term.hl-4 { background: #d0bfff; color: #1a1a1a; }
+mark.hl-5, .hl-chip.hl-5, .hl-swatch.hl-5, .fd-term.hl-5 { background: #ffc9a0; color: #1a1a1a; }
+mark.hl-6, .hl-chip.hl-6, .hl-swatch.hl-6, .fd-term.hl-6 { background: #99e9f2; color: #1a1a1a; }
+mark.hl-7, .hl-chip.hl-7, .hl-swatch.hl-7, .fd-term.hl-7 { background: #fcc2d7; color: #1a1a1a; }
 
 /* ---- Aba Destaques ---- */
 .hl-add { flex-direction: column; align-items: stretch; }
@@ -739,3 +739,54 @@ mark.hl-7, .hl-chip.hl-7, .hl-swatch.hl-7 { background: #fcc2d7; color: #1a1a1a;
 .badge-W { background: #d97706; }
 .badge-E { background: #dc2626; }
 .badge-F, .badge-A { background: #7f1d1d; }
+
+/* ---- Janela de resultados da busca no arquivo inteiro ---- */
+.find-dock {
+  flex: 0 0 auto;
+  height: 240px;
+  display: flex;
+  flex-direction: column;
+  min-height: 90px;
+  background: var(--bg-panel);
+  border-top: 2px solid var(--border);
+}
+.fd-resize { height: 5px; cursor: row-resize; background: var(--bg-header); flex: 0 0 auto; }
+.fd-resize:hover { background: var(--accent); }
+.fd-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  background: var(--bg-alt);
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 11.5px;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+}
+.fd-head button { font-size: 11px; padding: 1px 7px; }
+.fd-err { color: var(--lvl-E); }
+.fd-spacer { flex: 1; }
+.fd-legend { display: flex; gap: 4px; flex-wrap: wrap; }
+.fd-term {
+  padding: 0 6px;
+  border-radius: 3px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+}
+.fd-list { flex: 1; overflow: auto; font-family: var(--mono); font-size: 11.5px; }
+.fd-row { display: flex; gap: 8px; padding: 1px 8px; cursor: pointer; white-space: pre; }
+.fd-row:hover { background: var(--bg-hover); }
+.fd-row.on { background: var(--row-selected); color: var(--row-selected-fg); }
+.fd-n { color: var(--fg-dim); min-width: 78px; text-align: right; user-select: none; }
+.fd-row.on .fd-n { color: inherit; }
+.fd-tag { color: var(--accent); margin-right: 8px; }
+.fd-row.on .fd-tag { color: inherit; }
+.fd-txt { flex: 1; min-width: 0; }
+.fd-empty { padding: 12px; color: var(--fg-dim); font-family: system-ui, sans-serif; }
+
+/* Cabecalho da linha do tempo, com o botao de fechar. */
+.tl-head { display: flex; align-items: center; gap: 8px; padding-bottom: 3px; }
+.tl-close { padding: 0 6px; line-height: 1.3; }
+
+/* Caixa "ir para a linha". */
+.goto-line { width: 74px; font-size: 11px; text-align: right; }

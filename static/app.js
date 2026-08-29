@@ -296,6 +296,17 @@ function newTab(path) {
     timeRange: null,
     // Blocos de stack trace abertos (por padrao ficam dobrados).
     openTraces: new Set(),
+    // Linha do tempo: fechada ate ser pedida.
+    timelineOpen: false,
+    // Janela de resultados da busca no arquivo inteiro.
+    findOpen: false,
+    findLoading: false,
+    findResults: null,
+    findQuery: "",
+    findError: null,
+    findHeight: null,
+    // Cores atribuidas a cada palavra do filtro.
+    filterTerms: [],
   };
 }
 
@@ -475,7 +486,15 @@ async function loadFileContent(tab, { tail = false, offset = 0, limit = null, sc
     c: cols[i] || null,
   }));
   tab.selected.clear();
-  tab.lastClicked = null;
+  // Ao pular para uma linha (resultado de busca, evento da linha do tempo,
+  // "ir para linha"), ela precisa ficar selecionada: so rolar ate ela deixa o
+  // usuario sem saber qual das linhas visiveis era o alvo.
+  if (scrollToLine) {
+    tab.selected.add(scrollToLine);
+    tab.lastClicked = scrollToLine;
+  } else {
+    tab.lastClicked = null;
+  }
   tab.hlIdx = null;  // a pagina mudou: a navegacao de destaques recomeca
   recomputeSearch(tab);
   renderPanels();
@@ -548,6 +567,25 @@ function parseLiveFilter(query, caseSensitive) {
     terms.push({ field, negate, re: safeRegex(value, caseSensitive) });
   }
   return terms;
+}
+
+/** Cada palavra buscada ganha uma cor propria, inclusive as alternativas de um
+ *  "a|b|c". Assim da para ver, numa linha so, qual dos termos casou. */
+function filterTerms(tab) {
+  const out = [];
+  let color = 0;
+  for (const term of parseLiveFilter(tab.liveFilter, false)) {
+    if (term.negate) continue;   // termo negado esconde linhas, nao marca nada
+    const src = term.re.source;
+    // Um "a|b|c" simples vira uma cor por alternativa; com parenteses ou
+    // colchetes o "|" pode ser interno ao regex, entao fica uma cor so.
+    const parts = /[()[\]\\]/.test(src) ? [src] : src.split("|").filter(Boolean);
+    for (const part of parts) {
+      out.push({ pattern: part, color: color % HL_COLORS });
+      color++;
+    }
+  }
+  return out;
 }
 
 function termMatches(term, line) {
@@ -663,12 +701,17 @@ function collectRanges(text, re, cls, out) {
  *  destaques ligados. Quando duas marcacoes se sobrepoem, a primeira vence. */
 function decorateText(text, tab) {
   if (!text) return "";
-  if (!tab.searchTerm && !state.highlights.some((h) => h.enabled && h.pattern)) {
+  const terms = tab.filterTerms || [];
+  if (!tab.searchTerm && !terms.length
+      && !state.highlights.some((h) => h.enabled && h.pattern)) {
     return escapeHtml(text);  // caminho rapido: nada a marcar
   }
   const ranges = [];
   if (tab.searchTerm) {
     collectRanges(text, globalRegex(tab.searchTerm, false), "hit", ranges);
+  }
+  for (const term of terms) {
+    collectRanges(text, globalRegex(term.pattern, false), "hl-" + term.color, ranges);
   }
   for (const hl of state.highlights) {
     if (!hl.enabled || !hl.pattern) continue;
@@ -842,6 +885,9 @@ function buildPanel(tab, paneIndex) {
   panel.dataset.panelId = tab.id;
   panel.dataset.paneIndex = paneIndex;
 
+  // As cores dos termos sao recalculadas a cada render: o filtro pode ter
+  // mudado, e a marcacao precisa acompanhar.
+  tab.filterTerms = filterTerms(tab);
   const shown = tab.binary ? [] : visibleLines(tab);
 
   // --- barra de ferramentas -------------------------------------------------
@@ -856,9 +902,10 @@ function buildPanel(tab, paneIndex) {
     : "";
   toolbar.innerHTML = `
     ${paneSelect}
-    <input class="live-filter" value="${escapeHtml(tab.liveFilter)}"
-      placeholder="Filtrar: texto, regex, ou pid: tid: tag: app: text: level:  (prefixo - nega)"
-      title="Aceita regex. Prefixos: pid: tid: tag: app: text: level:. Um '-' antes do termo esconde as linhas que casarem.">
+    <input class="live-filter" list="filterHistoryList" value="${escapeHtml(tab.liveFilter)}"
+      placeholder="Buscar no arquivo todo (Enter). Ex: sales_code|imei|serialno"
+      title="Enter busca no ARQUIVO INTEIRO e abre a janela de resultados.&#10;&#10;a|b|c  = qualquer uma das palavras (cada uma ganha uma cor)&#10;a b    = a linha precisa ter as duas&#10;-a     = esconde as linhas com 'a' (so na pagina)&#10;Prefixos: tag: pid: tid: app: text: level:&#10;Aceita regex.">
+    <button data-act="filesearch" class="primary" title="Buscar no arquivo inteiro (Enter)">Buscar tudo</button>
     <div class="level-toggles">
       ${LEVELS.map((l) => `<button class="level-toggle${tab.levels.has(l) ? " on" : ""}" data-level="${l}" title="Nivel ${l}">${l}</button>`).join("")}
     </div>
@@ -870,6 +917,8 @@ function buildPanel(tab, paneIndex) {
     <select data-act="pagesize" title="Linhas por pagina">
       ${PAGE_SIZES.map((n) => `<option value="${n}"${n === tab.limit ? " selected" : ""}>${fmtNum(n)} linhas</option>`).join("")}
     </select>
+    <input data-act="goto" class="goto-line" placeholder="linha" title="Ir para a linha (Enter)">
+    <button data-act="timeline" class="${tab.timelineOpen ? "on-toggle" : ""}" title="Mostrar/ocultar a linha do tempo do arquivo">&#9776;</button>
     <span class="toolbar-sep"></span>
     <button data-act="find" title="Buscar e destacar nesta pagina (Ctrl+F)">&#128269;</button>
     <button data-act="prevhit" title="Ocorrencia anterior (Ctrl+,)">&#8963;</button>
@@ -885,7 +934,8 @@ function buildPanel(tab, paneIndex) {
     <span class="info"></span>
   `;
   panel.appendChild(toolbar);
-  panel.appendChild(buildTimeline(tab));
+  const timeline = buildTimeline(tab);
+  if (timeline) panel.appendChild(timeline);
 
   const info = toolbar.querySelector(".info");
   const hidden = tab.lines.length - shown.length;
@@ -898,6 +948,20 @@ function buildPanel(tab, paneIndex) {
       : ` | ${fmtNum(tab.offset + 1)}-${fmtNum(tab.offset + tab.lines.length)} de ${fmtNum(tab.totalLines)}`) +
     (tab.size != null ? ` | ${fmtSize(tab.size)}` : "") +
     (tab.searchHits.length ? ` | ${tab.searchHits.length} ocorrencia(s)` : "");
+
+  // Filtro sem resultado na pagina: o arquivo tem milhoes de linhas e a busca
+  // util quase sempre e a do arquivo inteiro, entao oferece o caminho.
+  if (!tab.binary && tab.lines.length && !shown.length && tab.liveFilter.trim() && !tab.findOpen) {
+    const hint = document.createElement("div");
+    hint.className = "range-bar";
+    hint.innerHTML = `<span>Nenhuma linha nesta pagina (${fmtNum(tab.offset + 1)}-` +
+      `${fmtNum(tab.offset + tab.lines.length)} de ${fmtNum(tab.totalLines)}). ` +
+      `O termo pode estar em outra parte do arquivo.</span>` +
+      `<button data-act="hint-search">Buscar no arquivo inteiro</button>`;
+    hint.querySelector("[data-act=hint-search]")
+      .addEventListener("click", () => searchWholeFile(tab, 0));
+    panel.appendChild(hint);
+  }
 
   // Barra de intervalo: aparece com duas ou mais linhas selecionadas.
   const rangeBar = buildRangeBar(tab);
@@ -932,6 +996,8 @@ function buildPanel(tab, paneIndex) {
       "</tbody></table>";
   }
   panel.appendChild(wrap);
+  const dock = buildFindDock(tab);
+  if (dock) panel.appendChild(dock);
 
   wirePanel(tab, panel, toolbar, wrap, shown, paneIndex);
   return panel;
@@ -1022,6 +1088,206 @@ function serverFilterParams(tab) {
   return { params, hasCriteria: [...params.keys()].length > 2, negateIgnored: negate && !filter };
 }
 
+// ---------------------------------------------------------------------------
+// Busca no arquivo inteiro, com os resultados numa janela propria
+// ---------------------------------------------------------------------------
+
+const FIND_PAGE = 500;
+
+/** Monta os parametros de /api/filtered a partir do que esta na caixa de
+ *  filtro. Termos sem prefixo viram `raw`: casam com a linha inteira, que e o
+ *  que a maioria das linhas de um bugreport exige — elas nem sao logcat. */
+function fileSearchParams(tab) {
+  const params = new URLSearchParams({ root: state.root, file: tab.path });
+  const terms = parseLiveFilter(tab.liveFilter, false);
+  const bare = [];
+  const byField = { tag: [], msg: [], pid: [], tid: [], uid: [] };
+  let negated = 0;
+  for (const term of terms) {
+    if (term.negate) { negated++; continue; }
+    if (!term.field) bare.push(term.re.source);
+    else byField[term.field].push(term.re.source);
+  }
+  // Varios termos no mesmo campo sao E: a linha precisa conter todos.
+  const all = (arr) => arr.map((s) => `(?=.*(?:${s}))`).join("") + ".*";
+  if (bare.length) params.set("raw", bare.length === 1 ? bare[0] : all(bare));
+  if (byField.tag.length) params.set("tag", byField.tag.join("|"));
+  if (byField.msg.length) params.set("text", byField.msg.join("|"));
+  if (byField.pid.length) params.set("pid", byField.pid.join("|"));
+  if (byField.tid.length) params.set("tid", byField.tid.join("|"));
+  if (byField.uid.length) params.set("uid", byField.uid.join("|"));
+  if (tab.levels.size) params.set("levels", [...tab.levels].join(","));
+
+  const filter = state.savedFilters.find((f) => f.id === tab.activeFilterId);
+  if (filter) {
+    if (filter.tag) params.set("tag", filter.tag);
+    if (filter.text) params.set("text", filter.text);
+    if (filter.pid) params.set("pid", filter.pid);
+    if (filter.tid) params.set("tid", filter.tid);
+    if (filter.levels && filter.levels.length) params.set("levels", filter.levels.join(","));
+    if (filter.negate) params.set("negate", "true");
+    if (filter.caseSensitive) params.set("case", "true");
+  }
+  return { params, hasCriteria: [...params.keys()].length > 2, negated };
+}
+
+/** Roda a busca no arquivo todo e abre a janela de resultados. */
+async function searchWholeFile(tab, offset = 0) {
+  const { params, hasCriteria, negated } = fileSearchParams(tab);
+  if (!hasCriteria) {
+    setStatus("Digite algo na caixa de filtro para buscar no arquivo inteiro.", true);
+    return;
+  }
+  params.set("offset", offset);
+  params.set("limit", FIND_PAGE);
+
+  saveToHistory(tab.liveFilter);
+  tab.findOpen = true;
+  tab.findLoading = true;
+  tab.findQuery = tab.liveFilter;
+  refreshPanel(tab);
+
+  try {
+    const res = await fetch(`/api/filtered?${params}`);
+    const data = await res.json();
+    if (!res.ok) {
+      tab.findError = data.error || "Erro na busca.";
+      tab.findResults = null;
+      return;
+    }
+    tab.findError = null;
+    tab.findResults = {
+      lines: data.lines,
+      numbers: data.line_numbers,
+      columns: data.columns || [],
+      matched: data.matched,
+      offset: data.offset,
+      hasMore: data.has_more,
+      truncated: data.truncated,
+      negated,
+    };
+    setStatus(`${fmtNum(data.matched)} linha(s) encontradas no arquivo inteiro.`);
+  } catch (err) {
+    tab.findError = "Falha na requisicao: " + err;
+    tab.findResults = null;
+  } finally {
+    tab.findLoading = false;
+    refreshPanel(tab);
+  }
+}
+
+/** Janela inferior com as linhas encontradas; clicar leva o log ate a linha. */
+function buildFindDock(tab) {
+  if (!tab.findOpen) return null;
+  const dock = document.createElement("div");
+  dock.className = "find-dock";
+
+  const terms = tab.filterTerms || [];
+  const legend = terms.map((t) =>
+    `<span class="fd-term hl-${t.color}">${escapeHtml(t.pattern)}</span>`).join("");
+
+  const r = tab.findResults;
+  const head = tab.findLoading
+    ? "Buscando no arquivo inteiro..."
+    : tab.findError
+      ? tab.findError
+      : r
+        ? `${fmtNum(r.matched)} linha(s)${r.truncated ? "+" : ""} para ` +
+          `"${escapeHtml(tab.findQuery)}"` +
+          (r.matched > r.lines.length
+            ? ` | mostrando ${fmtNum(r.offset + 1)}-${fmtNum(r.offset + r.lines.length)}`
+            : "")
+        : "";
+
+  dock.innerHTML =
+    `<div class="fd-resize" title="Arraste para redimensionar"></div>` +
+    `<div class="fd-head">` +
+      `<strong class="${tab.findError ? "fd-err" : ""}">${head}</strong>` +
+      `<span class="fd-legend">${legend}</span>` +
+      `<span class="fd-spacer"></span>` +
+      `<button data-fd="prev" ${!r || r.offset === 0 ? "disabled" : ""} title="Resultados anteriores">&#8592;</button>` +
+      `<button data-fd="next" ${!r || !r.hasMore ? "disabled" : ""} title="Proximos resultados">&#8594;</button>` +
+      `<button data-fd="export" ${!r ? "disabled" : ""} title="Exportar todos os resultados">Exportar</button>` +
+      `<button data-fd="close" class="icon-btn" title="Fechar a janela de resultados">&times;</button>` +
+    `</div>` +
+    `<div class="fd-list"></div>`;
+
+  const list = dock.querySelector(".fd-list");
+  if (r && r.lines.length) {
+    list.innerHTML = r.lines.map((text, i) => {
+      const c = r.columns[i];
+      const badge = c && c.level ? `<span class="badge badge-${c.level}">${c.level}</span>` : "";
+      const tag = c && c.tag ? `<span class="fd-tag">${escapeHtml(c.tag)}</span>` : "";
+      return `<div class="fd-row" data-line="${r.numbers[i]}">` +
+        `<span class="fd-n">${fmtNum(r.numbers[i])}</span>` +
+        `<span class="fd-txt">${badge}${tag}${decorateText(text, tab)}</span></div>`;
+    }).join("");
+  } else if (r) {
+    list.innerHTML = '<div class="fd-empty">Nenhuma linha encontrada no arquivo inteiro.</div>';
+  }
+
+  list.addEventListener("click", (e) => {
+    const row = e.target.closest(".fd-row");
+    if (!row) return;
+    list.querySelectorAll(".fd-row.on").forEach((n) => n.classList.remove("on"));
+    row.classList.add("on");
+    // Leva a tabela principal ate a linha correspondente do log completo.
+    jumpToLine(tab, Number(row.dataset.line));
+  });
+
+  const fd = (name) => dock.querySelector(`[data-fd="${name}"]`);
+  fd("close").addEventListener("click", () => {
+    tab.findOpen = false;
+    refreshPanel(tab);
+  });
+  fd("prev").addEventListener("click", () =>
+    searchWholeFile(tab, Math.max(0, tab.findResults.offset - FIND_PAGE)));
+  fd("next").addEventListener("click", () =>
+    searchWholeFile(tab, tab.findResults.offset + FIND_PAGE));
+  fd("export").addEventListener("click", () => exportFindResults(tab));
+
+  dock.querySelector(".fd-resize").addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startH = dock.getBoundingClientRect().height;
+    const onMove = (ev) => {
+      tab.findHeight = Math.min(Math.max(startH + startY - ev.clientY, 90), window.innerHeight * 0.8);
+      dock.style.height = tab.findHeight + "px";
+    };
+    const onUp = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  });
+  if (tab.findHeight) dock.style.height = tab.findHeight + "px";
+  return dock;
+}
+
+/** Baixa todas as linhas encontradas, nao so a pagina exibida no dock. */
+async function exportFindResults(tab) {
+  const { params } = fileSearchParams(tab);
+  params.set("offset", 0);
+  params.set("limit", 20000);
+  setStatus("Montando o arquivo de resultados...");
+  try {
+    const res = await fetch(`/api/filtered?${params}`);
+    const data = await res.json();
+    if (!res.ok) {
+      setStatus(data.error || "Erro exportando.", true);
+      return;
+    }
+    const body = data.lines.map((l, i) => `${data.line_numbers[i]}: ${l}`).join("\n");
+    const base = tab.path.split("/").pop().replace(/\.[^.]+$/, "");
+    downloadText(`${base}-busca.txt`, body + "\n");
+    setStatus(`${data.lines.length} linha(s) exportada(s)` +
+      (data.matched > data.lines.length ? ` de ${fmtNum(data.matched)} encontradas` : "") + ".");
+  } catch (err) {
+    setStatus("Falha na requisicao: " + err, true);
+  }
+}
+
 async function loadServerFiltered(tab, offset = 0) {
   const { params, hasCriteria, negateIgnored } = serverFilterParams(tab);
   if (!hasCriteria) {
@@ -1092,6 +1358,15 @@ function wirePanel(tab, panel, toolbar, wrap, shown, paneIndex) {
       refreshPanel(tab);
     }, 250);
   });
+  // Enter procura no arquivo inteiro: e o gesto natural, e sem ele a busca
+  // ficaria presa na pagina carregada.
+  liveInput.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    clearTimeout(debounce);
+    tab.liveFilter = liveInput.value;
+    searchWholeFile(tab, 0);
+  });
 
   toolbar.querySelectorAll(".level-toggle").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -1130,6 +1405,18 @@ function wirePanel(tab, panel, toolbar, wrap, shown, paneIndex) {
   act("find").addEventListener("click", () => promptSearch(tab));
   act("prevhit").addEventListener("click", () => stepSearch(tab, -1));
   act("nexthit").addEventListener("click", () => stepSearch(tab, 1));
+  act("filesearch").addEventListener("click", () => searchWholeFile(tab, 0));
+  act("timeline").addEventListener("click", () => {
+    tab.timelineOpen = !tab.timelineOpen;
+    refreshPanel(tab);
+  });
+  const gotoInput = act("goto");
+  gotoInput.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    const n = parseInt(gotoInput.value.replace(/\D/g, ""), 10);
+    if (!n || n < 1) return;
+    jumpToLine(tab, Math.min(n, tab.totalLines || n));
+  });
   act("wrap").addEventListener("change", (e) => {
     tab.wrapText = e.target.checked;
     refreshPanel(tab);
@@ -1861,15 +2148,30 @@ async function loadTimeline(tab) {
 /** Barra que representa o arquivo inteiro: altura = volume de erros na faixa,
  *  marcas verticais = crashes, ANRs e afins. Clicar navega ate a faixa. */
 function buildTimeline(tab) {
+  // A linha do tempo so ocupa espaco quando pedida, e o botao da barra fecha.
+  if (!tab.timelineOpen) return null;
+
   const box = document.createElement("div");
   box.className = "timeline";
+  const close = () => {
+    tab.timelineOpen = false;
+    refreshPanel(tab);
+  };
 
   if (!tab.timeline) {
     box.innerHTML = tab.timelineLoading
-      ? '<div class="timeline-hint">Analisando o arquivo inteiro...</div>'
-      : '<button class="timeline-load">Mostrar linha do tempo do arquivo</button>';
-    const btn = box.querySelector(".timeline-load");
-    if (btn) btn.addEventListener("click", () => loadTimeline(tab));
+      ? '<div class="tl-head"><span class="timeline-hint">Analisando o arquivo inteiro...</span></div>'
+      : '<div class="tl-head"><button class="timeline-load">Analisar o arquivo e montar a linha do tempo</button>' +
+        '<span class="timeline-hint">Percorre o arquivo todo uma vez; o resultado fica em cache.</span></div>';
+    const head = box.querySelector(".tl-head");
+    const btn = document.createElement("button");
+    btn.className = "icon-btn tl-close";
+    btn.innerHTML = "&times;";
+    btn.title = "Fechar a linha do tempo";
+    btn.addEventListener("click", close);
+    head.appendChild(btn);
+    const load = box.querySelector(".timeline-load");
+    if (load) load.addEventListener("click", () => loadTimeline(tab));
     return box;
   }
 
@@ -1899,9 +2201,16 @@ function buildTimeline(tab) {
   const width = Math.max(0.4, (tab.lines.length / total) * 100);
 
   box.innerHTML =
+    `<div class="tl-head">` +
+      `<span class="timeline-hint">Linha do tempo do arquivo &mdash; clique numa faixa para ir ate ela` +
+      `${tab.timeline.truncated ? " (analise truncada)" : ""}</span>` +
+      `<span class="fd-spacer"></span>` +
+      `<button class="icon-btn tl-close" title="Fechar a linha do tempo">&times;</button>` +
+    `</div>` +
     `<div class="tl-track">${bars}<div class="tl-window" style="left:${left}%;width:${width}%"></div></div>` +
     `<div class="tl-events"></div>`;
 
+  box.querySelector(".tl-close").addEventListener("click", close);
   box.querySelector(".tl-track").addEventListener("click", (e) => {
     const bar = e.target.closest(".tl-bar");
     if (!bar) return;
@@ -2317,13 +2626,19 @@ function saveToHistory(pattern) {
 }
 
 function renderHistoryDatalist() {
-  let dl = document.getElementById("searchHistoryList");
-  if (!dl) {
-    dl = document.createElement("datalist");
-    dl.id = "searchHistoryList";
-    document.body.appendChild(dl);
+  const options = loadHistory()
+    .map((p) => `<option value="${escapeHtml(p)}"></option>`).join("");
+  // Uma lista para o painel de busca em arquivos e outra para a caixa de
+  // filtro de cada painel; as duas compartilham o mesmo historico.
+  for (const id of ["searchHistoryList", "filterHistoryList"]) {
+    let dl = document.getElementById(id);
+    if (!dl) {
+      dl = document.createElement("datalist");
+      dl.id = id;
+      document.body.appendChild(dl);
+    }
+    dl.innerHTML = options;
   }
-  dl.innerHTML = loadHistory().map((p) => `<option value="${escapeHtml(p)}"></option>`).join("");
 }
 renderHistoryDatalist();
 

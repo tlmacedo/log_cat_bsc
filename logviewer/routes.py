@@ -207,6 +207,7 @@ def get_filtered():
             pid=request.args.get("pid") or None,
             tid=request.args.get("tid") or None,
             uid=request.args.get("uid") or None,
+            raw=request.args.get("raw") or None,
             negate=request.args.get("negate", "false").lower() == "true",
             case_sensitive=request.args.get("case", "false").lower() == "true",
         )
