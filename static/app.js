@@ -1294,9 +1294,10 @@ function markedRows(tab) {
 
 /** Distingue um clique de um arrasto para selecionar texto.
  *
- *  Sem isso, tentar selecionar um trecho de uma linha de resultado dispararia
- *  a navegacao no meio da selecao. Guarda onde o botao desceu e trata como
- *  clique so se o ponteiro praticamente nao andou e nada ficou selecionado. */
+ *  Usado na tabela de log, onde o clique simples seleciona a linha: sem isso,
+ *  arrastar para copiar um trecho trocaria a linha selecionada no meio da
+ *  selecao. Guarda onde o botao desceu e so trata como clique se o ponteiro
+ *  praticamente nao andou. */
 function clickNotDrag(container, handler) {
   let down = null;
   container.addEventListener("mousedown", (e) => { down = [e.clientX, e.clientY]; });
@@ -1325,6 +1326,9 @@ function resultRowHtml(tab, section, i) {
   const classes = ["fd-row"];
   if (levelMarked(tab, c)) classes.push("lvl-mark", "mk-" + c.level);
   if (tab.exportMarks.has(n) && !file) classes.push("is-marked");
+  // A linha aberta por duplo clique fica destacada; guardar no estado faz o
+  // destaque sobreviver ao redesenho que a navegacao provoca.
+  if (section.activeLine === n) classes.push("on");
   const badge = c && c.level ? `<span class="badge badge-${c.level}">${c.level}</span>` : "";
   const tag = c && c.tag ? `<span class="fd-tag">${escapeHtml(c.tag)}</span>` : "";
   const fileCell = file
@@ -1397,12 +1401,14 @@ function buildSection(tab, section) {
       });
     });
   });
-  clickNotDrag(list, (e) => {
+  // Duplo clique navega. O clique simples nao faz nada de proposito: assim da
+  // para selecionar trechos de uma ou varias linhas aqui sem que a janela do
+  // log fique pulando a cada toque.
+  list.addEventListener("dblclick", (e) => {
     const row = e.target.closest(".fd-row");
     if (!row) return;
-    box.querySelectorAll(".fd-row.on").forEach((n) => n.classList.remove("on"));
-    row.classList.add("on");
-    openAtLine(tab, Number(row.dataset.line), row.dataset.file);
+    section.activeLine = Number(row.dataset.line);
+    openAtLine(tab, section.activeLine, row.dataset.file);
   });
   return box;
 }
@@ -1431,10 +1437,11 @@ function buildMarkedSection(tab) {
     list.innerHTML = rows.map((row) => {
       const classes = ["fd-row"];
       if (levelMarked(tab, row.c)) classes.push("lvl-mark", "mk-" + row.c.level);
+      if (tab.markedActiveLine === row.n) classes.push("on");
       const flags = (row.marked ? '<span class="fd-flag">✓</span>' : "") +
         (row.bookmarked ? '<span class="fd-flag">⚑</span>' : "");
       const body = row.text === null
-        ? '<span class="fd-out">(fora da pagina carregada — clique para ir ate ela)</span>'
+        ? '<span class="fd-out">(fora da pagina carregada — duplo clique para ir ate ela)</span>'
         : decorateText(row.c ? (row.c.msg ?? row.text) : row.text, tab);
       return `<div class="${classes.join(" ")}" data-line="${row.n}">` +
         `<span class="fd-n">${fmtNum(row.n)}</span>` +
@@ -1459,9 +1466,11 @@ function buildMarkedSection(tab) {
     tab.bookmarks.clear();
     refreshPanel(tab);
   });
-  clickNotDrag(list, (e) => {
+  list.addEventListener("dblclick", (e) => {
     const row = e.target.closest(".fd-row");
-    if (row) openAtLine(tab, Number(row.dataset.line), null);
+    if (!row) return;
+    tab.markedActiveLine = Number(row.dataset.line);
+    openAtLine(tab, tab.markedActiveLine, null);
   });
   return box;
 }
@@ -1475,6 +1484,7 @@ function buildFindDock(tab) {
     `<div class="fd-resize" title="Arraste para redimensionar"></div>` +
     `<div class="fd-head">` +
       `<strong>Resultados</strong>` +
+      `<span class="fd-hint">duplo clique numa linha vai ate ela no log</span>` +
       `<span class="fd-spacer"></span>` +
       `<button data-fd="export" title="Exportar as secoes marcadas com 'exportar'">Exportar marcadas</button>` +
       `<button data-fd="clear" title="Remover todas as buscas">Limpar buscas</button>` +
