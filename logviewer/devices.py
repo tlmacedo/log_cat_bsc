@@ -33,7 +33,16 @@ PROP_TIMEOUT = 30
 CAPTURE_TIMEOUT = 300
 BUGREPORT_TIMEOUT = 900
 
-DEFAULT_CAPTURE_ROOT = os.path.expanduser("~/logviewer-capturas")
+# Onde as capturas sao gravadas. Dentro do container aponta para o volume
+# montado do host, senao a captura sumiria junto com o container.
+DEFAULT_CAPTURE_ROOT = os.environ.get(
+    "CAPTURE_ROOT") or os.path.expanduser("~/logviewer-capturas")
+
+# Servidor adb a usar. No container o adb daqui e so o cliente: quem enxerga a
+# USB e o adb da maquina do usuario, porque o Docker Desktop no Mac e no
+# Windows roda numa VM sem acesso as portas USB.
+ADB_HOST = os.environ.get("ADB_HOST") or None
+ADB_PORT = os.environ.get("ADB_PORT") or None
 
 # Propriedades que identificam o aparelho na lista. A ordem e a da exibicao.
 IDENTITY = (
@@ -65,6 +74,17 @@ class AdbError(RuntimeError):
     pass
 
 
+def _server_reachable(timeout=2):
+    """O container so alcanca a USB atraves do adb do host; sem esse servidor
+    de pe, a mensagem precisa dizer isso em vez de 'nenhum aparelho'."""
+    import socket
+    try:
+        with socket.create_connection((ADB_HOST, int(ADB_PORT or 5037)), timeout):
+            return True
+    except OSError:
+        return False
+
+
 def adb_path():
     """Caminho do adb, ou None se nao houver."""
     for candidate in ADB_CANDIDATES:
@@ -80,9 +100,19 @@ def _run(args, timeout):
     if not adb:
         raise AdbError("adb nao encontrado. Instale as platform-tools do Android "
                        "ou coloque o adb no PATH.")
+    if ADB_HOST and not _server_reachable():
+        raise AdbError(
+            f"Nao consegui falar com o servidor adb em {ADB_HOST}:{ADB_PORT or 5037}. "
+            "Rode 'adb start-server' na sua maquina (fora do container) e "
+            "confirme que ha um aparelho conectado.")
+    prefix = []
+    if ADB_HOST:
+        prefix += ["-H", ADB_HOST]
+    if ADB_PORT:
+        prefix += ["-P", str(ADB_PORT)]
     try:
         proc = subprocess.run(
-            [adb] + args, capture_output=True, timeout=timeout, check=False)
+            [adb] + prefix + args, capture_output=True, timeout=timeout, check=False)
     except subprocess.TimeoutExpired:
         raise AdbError(f"adb {' '.join(args[:2])} demorou demais e foi interrompido.")
     except OSError as e:

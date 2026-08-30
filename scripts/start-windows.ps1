@@ -1,0 +1,101 @@
+# Sobe o Log Viewer em container no Windows.
+#
+#   .\scripts\start-windows.ps1 [pasta-de-logs]
+#
+# Sem argumento, usa a pasta log\ do repositorio.
+param([string]$LogDir = "")
+
+$ErrorActionPreference = "Stop"
+Set-Location (Join-Path $PSScriptRoot "..")
+$Repo = (Get-Location).Path
+$Port = if ($env:HOST_PORT) { $env:HOST_PORT } else { "5057" }
+
+function Info($m) { Write-Host "> $m" -ForegroundColor Cyan }
+function Ok($m)   { Write-Host "OK $m" -ForegroundColor Green }
+function Warn($m) { Write-Host "!  $m" -ForegroundColor Yellow }
+function Die($m)  { Write-Host "X  $m" -ForegroundColor Red; exit 1 }
+
+# --- Docker ---------------------------------------------------------------
+if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+  Die "Docker nao encontrado. Instale o Docker Desktop: https://www.docker.com/products/docker-desktop"
+}
+try { docker info *> $null } catch {
+  Die "O Docker esta instalado mas nao esta rodando. Abra o Docker Desktop e tente de novo."
+}
+try { docker compose version *> $null } catch {
+  Die "Este Docker nao tem o 'docker compose'. Atualize o Docker Desktop."
+}
+Ok "Docker pronto"
+
+# --- Pasta de logs --------------------------------------------------------
+if ([string]::IsNullOrWhiteSpace($LogDir)) { $LogDir = Join-Path $Repo "log" }
+if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null }
+$LogDir = (Resolve-Path $LogDir).Path
+$CaptureDir = Join-Path $Repo "capturas"
+if (-not (Test-Path $CaptureDir)) { New-Item -ItemType Directory -Path $CaptureDir -Force | Out-Null }
+Ok "Logs:     $LogDir  (aparece como /logs no app)"
+Ok "Capturas: $CaptureDir"
+
+# --- adb do host ----------------------------------------------------------
+# O container nao enxerga a USB; ele conversa com o adb desta maquina.
+$AdbBin = $null
+$Candidates = @(
+  "adb",
+  (Join-Path $env:LOCALAPPDATA "Android\Sdk\platform-tools\adb.exe"),
+  (Join-Path $env:USERPROFILE "AppData\Local\Android\Sdk\platform-tools\adb.exe"),
+  "C:\platform-tools\adb.exe"
+)
+foreach ($c in $Candidates) {
+  if (Get-Command $c -ErrorAction SilentlyContinue) { $AdbBin = $c; break }
+  if (Test-Path $c) { $AdbBin = $c; break }
+}
+
+$AdbHostValue = "host.docker.internal"
+if ($AdbBin) {
+  # -a faz o servidor aceitar conexoes de fora do localhost, que e o caso do container.
+  try { & $AdbBin -a -P 5037 start-server *> $null } catch {
+    try { & $AdbBin start-server *> $null } catch { }
+  }
+  $Devs = 0
+  try { $Devs = (& $AdbBin devices | Select-Object -Skip 1 | Where-Object { $_ -match "device$" }).Count } catch { }
+  Ok "adb encontrado ($AdbBin) - $Devs aparelho(s) conectado(s)"
+} else {
+  $AdbHostValue = ""
+  Warn "adb nao encontrado. O app sobe normalmente, mas a aba de aparelhos USB"
+  Warn "ficara indisponivel. Para habilitar, instale as platform-tools do Android."
+}
+
+# --- Sobe --------------------------------------------------------------------
+@"
+LOG_DIR=$LogDir
+CAPTURE_DIR=$CaptureDir
+HOST_PORT=$Port
+ADB_HOST=$AdbHostValue
+ADB_PORT=5037
+"@ | Set-Content -Path ".env" -Encoding ASCII
+
+Info "Construindo a imagem (a primeira vez demora alguns minutos)..."
+docker compose build
+Info "Subindo o container..."
+docker compose up -d
+
+$Url = "http://127.0.0.1:$Port"
+$Pronto = $false
+foreach ($i in 1..60) {
+  try {
+    Invoke-WebRequest -Uri "$Url/api/config" -UseBasicParsing -TimeoutSec 2 | Out-Null
+    $Pronto = $true; break
+  } catch { Start-Sleep -Seconds 1 }
+}
+
+if ($Pronto) {
+  Ok "Log Viewer no ar em $Url"
+  Start-Process $Url
+} else {
+  Warn "O container subiu mas o servidor nao respondeu. Veja: docker compose logs -f"
+}
+
+Write-Host ""
+Write-Host "  parar:     docker compose down"
+Write-Host "  logs:      docker compose logs -f"
+Write-Host "  reiniciar: .\scripts\start-windows.ps1 `"$LogDir`""

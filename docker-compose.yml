@@ -1,0 +1,24 @@
+services:
+  logviewer:
+    build: .
+    image: log-cat-bsc:latest
+    container_name: log-cat-bsc
+    ports:
+      - "${HOST_PORT:-5057}:5057"
+    volumes:
+      # Pasta de logs do host, so leitura: o app nunca escreve nela.
+      - "${LOG_DIR:-./log}:/logs:ro"
+      # Capturas de aparelhos USB, gravadas no host para sobreviverem ao container.
+      - "${CAPTURE_DIR:-./capturas}:/capturas"
+    environment:
+      LOG_ROOT: /logs
+      CAPTURE_ROOT: /capturas
+      # Servidor adb da maquina do usuario. O Docker Desktop no Mac e no Windows
+      # roda numa VM sem acesso a USB, entao o cliente adb do container fala com
+      # o adb do host. Deixe ADB_HOST vazio para desligar a aba de USB.
+      ADB_HOST: "${ADB_HOST-host.docker.internal}"
+      ADB_PORT: "${ADB_PORT:-5037}"
+    extra_hosts:
+      # Necessario no Linux; no Mac e no Windows o Docker Desktop ja resolve.
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped

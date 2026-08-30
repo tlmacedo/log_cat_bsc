@@ -250,6 +250,20 @@ def get_filtered():
     return jsonify(result)
 
 
+@api.get("/config")
+def get_config():
+    """Configuracao do servidor que a interface precisa conhecer: a pasta de
+    logs padrao (dentro do container e um volume montado do host) e onde as
+    capturas sao gravadas."""
+    return jsonify({
+        "default_root": os.environ.get("LOG_ROOT") or "",
+        "capture_root": devices.DEFAULT_CAPTURE_ROOT,
+        "adb": devices.adb_path(),
+        "adb_host": devices.ADB_HOST,
+        "in_container": os.path.exists("/.dockerenv"),
+    })
+
+
 @api.get("/usb_devices")
 def get_usb_devices():
     """Aparelhos Android ligados na USB, com o que identifica cada um."""

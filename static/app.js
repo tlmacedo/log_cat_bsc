@@ -161,6 +161,16 @@ const ROOT_KEY = "logviewer.lastRoot";
 const lastRoot = store(ROOT_KEY, "");
 if (lastRoot) el("#rootInput").value = lastRoot;
 
+/** No container a pasta de logs e um volume montado; sem isso o campo abriria
+ *  vazio e o usuario teria de adivinhar o caminho de dentro do container. */
+fetch("/api/config").then((r) => r.json()).then((cfg) => {
+  state.config = cfg;
+  if (!el("#rootInput").value && cfg.default_root) {
+    el("#rootInput").value = cfg.default_root;
+    loadRoot();
+  }
+}).catch(() => { /* sem config o app segue como antes */ });
+
 async function loadRoot() {
   const root = el("#rootInput").value.trim();
   if (!root) return;

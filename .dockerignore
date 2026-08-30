@@ -1,0 +1,10 @@
+# Logs reais do aparelho: centenas de MB e potencialmente sensiveis.
+log/
+capturas/
+.git/
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+scripts/
+*.md

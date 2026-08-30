@@ -6,3 +6,8 @@ __pycache__/
 # Dados reais de bug report do dispositivo (grandes e potencialmente sensiveis) -
 # nao versionar; aponte a UI para uma pasta local de logs em tempo de uso.
 /log/
+
+# Capturas de aparelhos USB (grandes e com dados do aparelho) e o .env gerado
+# pelos scripts de inicializacao.
+/capturas/
+/.env
