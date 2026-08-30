@@ -414,8 +414,10 @@ function newTab(path) {
     timeRange: null,
     // Blocos de stack trace abertos (por padrao ficam dobrados).
     openTraces: new Set(),
-    // Segue o fim do arquivo enquanto ele cresce (coleta ao vivo).
+    // Segue o fim do arquivo enquanto ele cresce (coleta ao vivo) e mantem a
+    // visao na ultima linha a cada atualizacao.
     follow: false,
+    autoScroll: false,
     // Linha do tempo: fechada ate ser pedida.
     timelineOpen: false,
     // Janela de resultados: uma secao por busca feita.
@@ -578,6 +580,11 @@ async function loadFileContent(tab, { tail = false, offset = 0, limit = null, sc
   if (tail) params.set("tail", "true");
   else params.set("offset", offset);
 
+  // Onde a rolagem estava, para nao jogar o usuario de volta ao topo a cada
+  // atualizacao do modo "Seguir".
+  const painelAtual = panelsEl.querySelector(`[data-panel-id="${tab.id}"] .log-wrap`);
+  const rolagemAnterior = painelAtual ? painelAtual.scrollTop : null;
+
   setStatus("Carregando " + tab.path.split("/").pop() + "...");
   let data;
   try {
@@ -632,7 +639,39 @@ async function loadFileContent(tab, { tail = false, offset = 0, limit = null, sc
   setStatus(`${tab.path.split("/").pop()}: linhas ${fmtNum(tab.offset + 1)}-` +
     `${fmtNum(tab.offset + tab.lines.length)} de ${fmtNum(tab.totalLines)}` +
     (tab.format ? ` | formato ${tab.format}` : ""));
-  if (scrollToLine) scrollLogToLine(tab, scrollToLine);
+  if (scrollToLine) {
+    scrollLogToLine(tab, scrollToLine);
+  } else if (tab.autoScroll) {
+    scrollToEnd(tab);
+  } else if (rolagemAnterior !== null && tail) {
+    // Atualizacao do "Seguir" sem autoscroll: mantem onde o usuario estava.
+    restoreScroll(tab, rolagemAnterior);
+  }
+}
+
+/** Leva a tabela ate a ultima linha carregada. */
+function scrollToEnd(tab) {
+  requestAnimationFrame(() => {
+    for (const panel of panelsEl.querySelectorAll(`[data-panel-id="${tab.id}"]`)) {
+      const wrap = panel.querySelector(".log-wrap");
+      if (!wrap) continue;
+      suppressScrollHide = true;
+      wrap.scrollTop = wrap.scrollHeight;
+      setTimeout(() => { suppressScrollHide = false; }, 0);
+    }
+  });
+}
+
+function restoreScroll(tab, top) {
+  requestAnimationFrame(() => {
+    for (const panel of panelsEl.querySelectorAll(`[data-panel-id="${tab.id}"]`)) {
+      const wrap = panel.querySelector(".log-wrap");
+      if (!wrap) continue;
+      suppressScrollHide = true;
+      wrap.scrollTop = top;
+      setTimeout(() => { suppressScrollHide = false; }, 0);
+    }
+  });
 }
 
 async function jumpToLine(tab, lineNumber) {
@@ -1181,6 +1220,9 @@ function buildPanel(tab, paneIndex) {
     <button data-act="nexthit" title="Proxima ocorrencia (Ctrl+.)">&#8964;</button>
     <label class="toolbar-check" title="Recarregar o fim do arquivo automaticamente — util enquanto uma coleta ao vivo esta gravando">
       <input type="checkbox" data-act="follow"${tab.follow ? " checked" : ""}> Seguir
+    </label>
+    <label class="toolbar-check" title="Manter a visao na ultima linha a cada atualizacao">
+      <input type="checkbox" data-act="autoscroll"${tab.autoScroll ? " checked" : ""}> Rolar p/ o fim
     </label>
     <label class="toolbar-check" title="Quebrar linhas longas no espaco horizontal disponivel, em vez de rolar na horizontal">
       <input type="checkbox" data-act="wrap"${tab.wrapText ? " checked" : ""}> Quebrar linha
@@ -1974,6 +2016,10 @@ function wirePanel(tab, panel, toolbar, wrap, shown, paneIndex) {
     tab.follow = e.target.checked;
     if (tab.follow) loadFileContent(tab, { tail: true });
   });
+  act("autoscroll").addEventListener("change", (e) => {
+    tab.autoScroll = e.target.checked;
+    if (tab.autoScroll) scrollToEnd(tab);
+  });
   act("wrap").addEventListener("change", (e) => {
     tab.wrapText = e.target.checked;
     refreshPanel(tab);
@@ -2710,7 +2756,9 @@ async function abrirAoVivo(live) {
   openFile(live.file.split("/").pop());
   const tab = activeTab();
   if (tab) {
+    // Numa coleta ao vivo o que interessa e a linha que acabou de chegar.
     tab.follow = true;
+    tab.autoScroll = true;
     await loadFileContent(tab, { tail: true });
   }
 }
