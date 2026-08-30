@@ -22,6 +22,9 @@ const state = {
   panes: [null, null, null],
   focusedPane: 0,
   syncTime: true,
+  // Aparelho USB de onde veio a pasta aberta, quando foi uma captura.
+  rootDevice: null,
+  rootDeviceBase: null,
 };
 
 const el = (sel) => document.querySelector(sel);
@@ -163,6 +166,10 @@ async function loadRoot() {
   if (!root) return;
   state.root = root;
   persist(ROOT_KEY, root);
+  // Trocar para uma pasta fora da captura desfaz o vinculo com o aparelho.
+  if (state.rootDevice && !(state.rootDeviceBase && root.startsWith(state.rootDeviceBase))) {
+    setRootDevice(null);
+  }
   setStatus("Carregando arvore...");
   treeEl.innerHTML = "";
   try {
@@ -653,9 +660,12 @@ function termsOf(query, start = 0, tab = null) {
     // "sbrowser" nao aparece na linha, mas "10076" aparece.
     if (f.pids && f.pids.length) {
       for (const pid of f.pids.slice(0, 4)) {
+        const proc = (tab && tab.procMap && tab.procMap[pid]) || null;
         out.push({
-          pattern: `\\b${pid}\\b`, label: pid, color: color % HL_COLORS, field: f.field,
-          note: (tab && tab.procMap && tab.procMap[pid]) || null,
+          // O numero sozinho nao diz nada: a etiqueta carrega o processo.
+          pattern: `\\b${pid}\\b`,
+          label: proc ? `${pid} ${shortProc(proc)}` : pid,
+          color: color % HL_COLORS, field: f.field, note: proc,
         });
         color++;
       }
@@ -1164,7 +1174,7 @@ function fmtDelta(ms) {
 // Busca no arquivo inteiro, com os resultados numa janela propria
 // ---------------------------------------------------------------------------
 
-const FIND_PAGE = 500;
+const FIND_PAGE = 1000;
 const MAX_SECTIONS = 12;
 
 // ---------------------------------------------------------------------------
@@ -1301,6 +1311,7 @@ async function runSearch(tab, query, { sectionId = null, offset = 0, groups = nu
       groups,
       savedNames,
       terms: termsOf(source, tab.colorCursor || 0, tab),
+      source: tab.path.split("/").pop(),
       results: null,
       collapsed: false,
       exportChecked: false,
@@ -1315,6 +1326,11 @@ async function runSearch(tab, query, { sectionId = null, offset = 0, groups = nu
     section.error = null;
     if (groups) section.groups = groups;
   }
+
+  // Uma busca nova recolhe as anteriores e fica aberta: com varias secoes
+  // abertas a lista vira uma parede e some o que se acabou de procurar.
+  for (const other of tab.findSections) other.collapsed = other !== section;
+  section.collapsed = false;
 
   saveToHistory(query);
   tab.findOpen = true;
@@ -1501,17 +1517,32 @@ function buildSection(tab, section) {
           (r.files ? ` em ${r.filesSearched} arquivo(s)` : "")
         : "";
 
-  // O cabecalho e o resumo pedido: so as palavras coloridas e a contagem.
+  // De onde vieram os resultados. Com dois aparelhos capturados ou varios
+  // arquivos abertos, a secao precisa dizer a que log ela se refere.
+  const origem = r && r.files
+    ? `${r.filesSearched} arquivo(s)`
+    : (section.source || tab.path.split("/").pop());
+  const aparelho = state.rootDevice && state.rootDevice.modelo
+    ? ` \u00b7 ${state.rootDevice.modelo.value}` : "";
+
+  // Paginacao: quantas linhas desta pagina, de quantas encontradas.
+  const pagina = r && !r.files && r.matched > r.lines.length
+    ? `${fmtNum(r.offset + 1)}-${fmtNum(r.offset + r.lines.length)} de ${fmtNum(r.matched)}`
+    : "";
+
   box.innerHTML =
     `<header class="fd-sec-head">` +
       `<button class="fd-toggle" title="Colapsar/expandir">${section.collapsed ? "▸" : "▾"}</button>` +
       `<span class="fd-chips">${chipsHtml(section)}</span>` +
+      `<span class="fd-origin" title="${escapeHtml(origem + aparelho)}">` +
+        `${escapeHtml(origem)}${escapeHtml(aparelho)}</span>` +
       `<span class="fd-count${section.error ? " fd-err" : ""}">${escapeHtml(count)}</span>` +
+      `${pagina ? `<span class="fd-pagina">${pagina}</span>` : ""}` +
       `<span class="fd-spacer"></span>` +
       `<label class="fd-check" title="Marcar esta secao para exportar">` +
         `<input type="checkbox" class="fd-export"${section.exportChecked ? " checked" : ""}> exportar</label>` +
-      `<button class="fd-page" data-dir="-1" ${!r || r.files || r.offset === 0 ? "disabled" : ""} title="Resultados anteriores">&#8592;</button>` +
-      `<button class="fd-page" data-dir="1" ${!r || r.files || !r.hasMore ? "disabled" : ""} title="Proximos resultados">&#8594;</button>` +
+      `<button class="fd-page" data-dir="-1" ${!r || r.files || r.offset === 0 ? "disabled" : ""} title="Pagina anterior">&#8592;</button>` +
+      `<button class="fd-page" data-dir="1" ${!r || r.files || !r.hasMore ? "disabled" : ""} title="Proxima pagina">&#8594;</button>` +
       `<button class="fd-close icon-btn" title="Remover esta busca">&times;</button>` +
     `</header>` +
     `<div class="fd-list"></div>`;
@@ -1525,11 +1556,7 @@ function buildSection(tab, section) {
       marked: !withFile && tab.exportMarks.has(r.numbers[i]),
       active: section.activeLine === r.numbers[i],
     }));
-    list.innerHTML = resultTableHtml(tab, rows, withFile, tab.wrapText) +
-      (!withFile && r.matched > r.lines.length
-        ? `<div class="fd-more">mostrando ${fmtNum(r.offset + 1)}-` +
-          `${fmtNum(r.offset + r.lines.length)} de ${fmtNum(r.matched)}</div>`
-        : "");
+    list.innerHTML = resultTableHtml(tab, rows, withFile, tab.wrapText);
   } else if (r) {
     list.innerHTML = '<div class="fd-empty">Nenhuma linha encontrada.</div>';
   }
@@ -2383,6 +2410,118 @@ function renderDeviceInfo() {
       setStatus(`Filtrando por tag:${node.dataset.tag}`);
     });
   });
+}
+
+// ---------------------------------------------------------------------------
+// Aparelhos ligados na USB (adb)
+// ---------------------------------------------------------------------------
+
+const usbListEl = el("#usbList");
+let usbLabels = {};
+
+/** Marca no topo de qual aparelho e a pasta aberta. Sem isso, com dois
+ *  aparelhos capturados, nada na tela diria de quem sao as linhas na tela. */
+function setRootDevice(identity) {
+  state.rootDevice = identity || null;
+  const badge = el("#rootDevice");
+  if (!identity) {
+    badge.hidden = true;
+    return;
+  }
+  const modelo = identity.modelo?.value || "aparelho";
+  const serial = identity.serial?.value || "";
+  badge.hidden = false;
+  badge.textContent = `\u{1F4F1} ${modelo}${serial ? " · " + serial : ""}`;
+  badge.title = Object.entries(identity)
+    .filter(([, v]) => v && v.value)
+    .map(([k, v]) => `${usbLabels[k] || k}: ${v.value}  (${v.prop})`)
+    .join("\n");
+}
+
+el("#usbScanBtn").addEventListener("click", scanUsb);
+
+async function scanUsb() {
+  const btn = el("#usbScanBtn");
+  btn.disabled = true;
+  usbListEl.innerHTML = '<p class="side-hint">Procurando...</p>';
+  try {
+    const res = await fetch("/api/usb_devices");
+    const data = await res.json();
+    if (!res.ok) {
+      usbListEl.innerHTML = `<p class="side-hint usb-err">${escapeHtml(data.error)}</p>`;
+      return;
+    }
+    usbLabels = data.labels || {};
+    renderUsb(data);
+  } catch (err) {
+    usbListEl.innerHTML = `<p class="side-hint usb-err">Falha na requisicao: ${escapeHtml(err)}</p>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderUsb(data) {
+  if (!data.devices.length) {
+    usbListEl.innerHTML = '<p class="side-hint">Nenhum aparelho na USB. Ligue o cabo e ' +
+      'habilite a depuracao USB no aparelho.</p>';
+    return;
+  }
+  usbListEl.innerHTML = data.devices.map((dev, i) => {
+    const id = dev.identity;
+    if (!id) {
+      return `<div class="usb-dev usb-off">` +
+        `<div class="usb-title">${escapeHtml(dev.model_hint || dev.serial)}</div>` +
+        `<div class="usb-err">${escapeHtml(dev.error || "sem resposta")}</div></div>`;
+    }
+    const rows = Object.entries(id)
+      .filter(([, v]) => v && v.value)
+      .map(([k, v]) =>
+        `<div class="usb-row" title="${escapeHtml(v.prop)}">` +
+        `<span class="k">${escapeHtml(usbLabels[k] || k)}</span>` +
+        `<span class="v">${escapeHtml(v.value)}</span></div>`).join("");
+    return `<div class="usb-dev" data-i="${i}">` +
+      `<div class="usb-title">${escapeHtml(id.modelo?.value || dev.serial)}</div>` +
+      rows +
+      `<button class="usb-capture" data-serial="${escapeHtml(dev.serial)}">Capturar logs</button>` +
+      `</div>`;
+  }).join("") +
+    `<p class="side-hint">Cada aparelho grava numa pasta propria, nomeada por ` +
+    `modelo e serial, e a captura abre essa pasta — dois aparelhos nunca se misturam.</p>`;
+
+  usbListEl.querySelectorAll(".usb-capture").forEach((btn) => {
+    btn.addEventListener("click", () => captureUsb(btn, btn.dataset.serial));
+  });
+}
+
+async function captureUsb(btn, serial) {
+  const withBugreport = el("#usbBugreport").checked;
+  btn.disabled = true;
+  btn.textContent = withBugreport ? "Capturando (bugreport demora)..." : "Capturando...";
+  setStatus(`Capturando logs de ${serial}...`);
+  try {
+    const params = new URLSearchParams({ serial });
+    if (withBugreport) params.set("bugreport", "true");
+    const res = await fetch(`/api/usb_capture?${params}`, { method: "POST" });
+    const data = await res.json();
+    if (!res.ok) {
+      setStatus(data.error || "Erro na captura.", true);
+      return;
+    }
+    // Abre a pasta do aparelho: a partir daqui a analise e a mesma de sempre.
+    el("#rootInput").value = data.path;
+    state.rootDeviceBase = data.path;
+    setRootDevice(data.identity);
+    await loadRoot();
+    // Leva para a arvore: e nela que os arquivos capturados aparecem.
+    document.querySelector('.side-tab[data-side="files"]').click();
+    setStatus(`${data.files.length} arquivo(s) capturados de ` +
+      `${data.identity.modelo?.value || serial} em ${data.path}`);
+  } catch (err) {
+    setStatus("Falha na requisicao: " + err, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Capturar logs";
+  }
 }
 
 // ---------------------------------------------------------------------------

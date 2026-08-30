@@ -865,3 +865,44 @@ tr.is-marked td.c-n {
 .fd-node-del:hover { color: var(--lvl-E); }
 .dialog-hint { margin: 0; font-size: 11px; color: var(--fg-dim); line-height: 1.5; }
 .dialog-hint code { background: var(--bg-header); padding: 0 4px; border-radius: 2px; font-family: var(--mono); }
+
+/* ---- Aparelhos ligados na USB ---- */
+.usb-list { padding: 0 6px; max-height: 40%; overflow: auto; flex: 0 0 auto; }
+.usb-check { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--fg-dim); }
+.usb-dev {
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  padding: 6px 8px;
+  margin-bottom: 6px;
+  background: var(--bg-alt);
+}
+.usb-dev.usb-off { opacity: .8; border-style: dashed; }
+.usb-title { font-weight: 600; font-size: 12px; margin-bottom: 4px; }
+.usb-row { display: flex; gap: 6px; font-size: 11px; padding: 1px 0; }
+.usb-row .k { color: var(--fg-dim); flex: 0 0 42%; }
+.usb-row .v { font-family: var(--mono); word-break: break-word; }
+.usb-err { color: var(--lvl-E); font-size: 11px; }
+.usb-capture { width: 100%; margin-top: 6px; font-size: 11px; }
+
+/* Aparelho a que pertence a pasta aberta. */
+.root-device {
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--fg);
+  white-space: nowrap;
+}
+.root-device[hidden] { display: none; }
+
+/* Origem e paginacao no cabecalho da secao de resultados. */
+.fd-origin {
+  color: var(--accent);
+  font-size: 10.5px;
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+.fd-pagina { color: var(--fg-dim); font-size: 10.5px; white-space: nowrap; }

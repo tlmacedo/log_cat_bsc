@@ -10,6 +10,7 @@
   <div id="topbar">
     <input id="rootInput" placeholder="Caminho da pasta de logs, ex: /Volumes/Development/SIDIA/log_cat_bsc/log">
     <button id="loadBtn">Carregar pasta</button>
+    <span id="rootDevice" class="root-device" hidden></span>
     <span id="status"></span>
     <span class="topbar-spacer"></span>
     <label class="topbar-check" title="Ao clicar numa linha, os outros paineis pulam para o horario mais proximo">
@@ -41,6 +42,13 @@
       </section>
 
       <section class="side-pane" data-pane="device">
+        <div class="side-toolbar">
+          <button id="usbScanBtn" title="Procurar aparelhos Android ligados na USB">&#128241; Procurar USB</button>
+          <label class="usb-check" title="Inclui o bugreport na captura (leva minutos e gera dezenas de MB)">
+            <input type="checkbox" id="usbBugreport"> bugreport
+          </label>
+        </div>
+        <div id="usbList" class="usb-list"></div>
         <div class="side-toolbar">
           <select id="deviceScope" title="Quais arquivos analisar">
             <option value="current">Arquivo atual</option>
