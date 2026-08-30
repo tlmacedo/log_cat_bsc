@@ -276,7 +276,12 @@ class FilterSpec:
         self.levels = set(levels or ())
         self.negate = bool(negate)
         self.tag = re.compile(tag, flags) if tag else None
-        self.text = re.compile(text, flags) if text else None
+        # `text` procura so na mensagem do logcat, e tambem aceita lista: varias
+        # palavras exigidas na mesma linha.
+        text_list = [text] if isinstance(text, str) else list(text or ())
+        text_list = [t for t in text_list if t]
+        self.text_list = [re.compile(t, flags) for t in text_list]
+        self.text = self.text_list[0] if self.text_list else None
         self.pid = re.compile(pid, flags) if pid else None
         self.tid = re.compile(tid, flags) if tid else None
         self.uid = re.compile(uid, flags) if uid else None
@@ -284,15 +289,26 @@ class FilterSpec:
         # termo digitado sem prefixo deve fazer: quem procura "Vold" espera
         # achar tanto no texto quanto na TAG. Em um bugreport a maior parte das
         # linhas nem e logcat, e so `raw` alcanca essas.
-        self.raw = re.compile(raw, flags) if raw else None
+        #
+        # Vem como lista quando o usuario exige varias palavras na mesma linha
+        # ("a&b" ou dois termos soltos): todas precisam casar. Cada elemento
+        # ainda pode ter "|" internamente, que continua sendo "ou".
+        raw_list = [raw] if isinstance(raw, str) else list(raw or ())
+        raw_list = [r for r in raw_list if r]
+        self.raw_list = [re.compile(r, flags) for r in raw_list]
+        self.raw = self.raw_list[0] if self.raw_list else None
+        # A triagem usa o padrao mais longo: literal maior tende a ser mais
+        # raro, entao descarta mais linhas antes da verificacao completa.
+        self.raw_probe_src = max(raw_list, key=len) if raw_list else None
         # Versao em bytes do padrao, usada quando o filtro so olha a linha crua:
         # evita decodificar centenas de MB so para descartar a maioria das
         # linhas. So vale para padroes ASCII, que e o caso de busca em log.
+        probe = self.raw_probe_src
         self.raw_bytes = None
         self.raw_bytes_lower = None
-        if raw and raw.isascii():
+        if probe and probe.isascii():
             try:
-                self.raw_bytes = re.compile(raw.encode("ascii"), flags)
+                self.raw_bytes = re.compile(probe.encode("ascii"), flags)
             except re.error:
                 self.raw_bytes = None
             # Buscar sem diferenciar maiusculas custa caro: o motor de regex
@@ -302,15 +318,15 @@ class FilterSpec:
             # os deslocamentos continuam validos.
             # So vale sem barra invertida no padrao: minusculizar trocaria \W
             # por \w e mudaria o sentido.
-            if self.raw_bytes is not None and flags & re.IGNORECASE and "\\" not in raw:
+            if self.raw_bytes is not None and flags & re.IGNORECASE and "\\" not in probe:
                 try:
-                    self.raw_bytes_lower = re.compile(raw.lower().encode("ascii"))
+                    self.raw_bytes_lower = re.compile(probe.lower().encode("ascii"))
                 except re.error:
                     self.raw_bytes_lower = None
 
     @property
     def empty(self):
-        return not (self.levels or self.tag or self.text or self.raw
+        return not (self.levels or self.tag or self.text_list or self.raw_list
                     or self.pid or self.tid or self.uid)
 
     @property
@@ -319,17 +335,17 @@ class FilterSpec:
         que e o maior custo da varredura, ainda mais em arquivo de formato misto
         onde cada linha tenta os nove padroes antes de desistir."""
         return bool(self.levels or self.tag or self.pid
-                    or self.tid or self.uid or self.text)
+                    or self.tid or self.uid or self.text_list)
 
     def cache_key(self):
         return json.dumps({
             "levels": sorted(self.levels),
             "tag": self.tag.pattern if self.tag else None,
-            "text": self.text.pattern if self.text else None,
+            "text": [t.pattern for t in self.text_list],
             "pid": self.pid.pattern if self.pid else None,
             "tid": self.tid.pattern if self.tid else None,
             "uid": self.uid.pattern if self.uid else None,
-            "raw": self.raw.pattern if self.raw else None,
+            "raw": [r.pattern for r in self.raw_list],
             "negate": self.negate,
             "flags": self.flags,
         }, sort_keys=True)
@@ -339,8 +355,9 @@ class FilterSpec:
         return (not hit) if self.negate else hit
 
     def _raw_match(self, line, parsed):
-        if self.raw is not None and not self.raw.search(line):
-            return False
+        for regex in self.raw_list:
+            if not regex.search(line):
+                return False
         if self.levels:
             if not parsed or parsed["level"] not in self.levels:
                 return False
@@ -350,11 +367,12 @@ class FilterSpec:
                 continue
             if not parsed or not regex.search(parsed[field] or ""):
                 return False
-        if self.text is not None:
+        if self.text_list:
             # Sem parse (cabecalho de bugreport, dumpsys) o texto e a linha toda.
             subject = (parsed["msg"] if parsed else line) or ""
-            if not self.text.search(subject):
-                return False
+            for regex in self.text_list:
+                if not regex.search(subject):
+                    return False
         return True
 
 
@@ -421,6 +439,51 @@ def _scan_raw_bytes(path, pattern, max_hits, lowered=None):
     return hits, truncated
 
 
+class MultiSpec:
+    """Varios filtros em OU: a linha entra se casar com qualquer um dos nos.
+
+    E o que permite montar uma consulta do tipo "TAG Telecom com estas palavras
+    OU o PID do sbrowser com aquelas", que nenhum filtro de campo unico
+    consegue expressar."""
+
+    def __init__(self, specs):
+        self.specs = [s for s in specs if not s.empty]
+
+    @property
+    def empty(self):
+        return not self.specs
+
+    @property
+    def needs_parse(self):
+        return any(s.needs_parse for s in self.specs)
+
+    def cache_key(self):
+        return json.dumps(["OR"] + [s.cache_key() for s in self.specs], sort_keys=True)
+
+    def matches(self, line, parsed):
+        return any(s.matches(line, parsed) for s in self.specs)
+
+    def prefilter(self):
+        """Regex em bytes que qualquer linha aceitavel obrigatoriamente casa.
+
+        So existe se todo no tiver um padrao de texto: basta um no sem texto
+        (por exemplo, so `tag:`) para que qualquer linha seja candidata e a
+        triagem perca o sentido. Serve para nao parsear o arquivo inteiro
+        quando os acertos sao esparsos, que e o caso normal."""
+        parts = []
+        for spec in self.specs:
+            probe = spec.raw or spec.text
+            if probe is None or spec.negate or not probe.pattern.isascii():
+                return None
+            parts.append(f"(?:{probe.pattern})")
+        if not parts:
+            return None
+        try:
+            return re.compile("|".join(parts).encode("ascii"), re.IGNORECASE)
+        except re.error:
+            return None
+
+
 def filter_index(path, encoding, log_format, spec):
     """Numeros de linha e deslocamentos em bytes de tudo que casa com o filtro.
     Guardar o deslocamento permite paginar depois com um seek por linha, em vez
@@ -434,9 +497,38 @@ def filter_index(path, encoding, log_format, spec):
 
     # Caminho rapido: o filtro so procura texto na linha inteira, entao da para
     # varrer os bytes em blocos, sem decodificar nem parsear nada.
-    if (not needs_parse) and spec.raw_bytes is not None and not spec.negate:
+    if (not needs_parse) and getattr(spec, "raw_bytes", None) is not None and not spec.negate:
         hits, truncated = _scan_raw_bytes(
             path, spec.raw_bytes, MAX_FILTER_HITS, spec.raw_bytes_lower)
+        # Exigir varias palavras na mesma linha ("a&b") nao pode virar um
+        # lookahead na varredura: o motor tentaria casar em cada posicao do
+        # bloco e o custo explodiria. Em vez disso a triagem usa uma palavra e
+        # as demais sao conferidas so nas linhas candidatas, que sao poucas.
+        if len(spec.raw_list) > 1 and hits:
+            rest = [r for r in spec.raw_list if r is not spec.raw]
+            kept = []
+            with open(path, "rb") as f:
+                for line_no, byte_off in hits:
+                    f.seek(byte_off)
+                    line = f.readline().decode(encoding, errors="replace")
+                    if all(r.search(line) for r in rest):
+                        kept.append((line_no, byte_off))
+            hits = kept
+        return _filter_cache.put(key, {"hits": hits, "truncated": truncated})
+
+    # Filtro composto: faz a triagem nos bytes e so decodifica e parseia as
+    # linhas candidatas, que costumam ser uma fracao minima do arquivo.
+    probe = spec.prefilter() if isinstance(spec, MultiSpec) else None
+    if probe is not None:
+        candidates, truncated = _scan_raw_bytes(path, probe, MAX_FILTER_HITS)
+        hits = []
+        with open(path, "rb") as f:
+            for line_no, byte_off in candidates:
+                f.seek(byte_off)
+                line = f.readline().decode(encoding, errors="replace").rstrip("\n").rstrip("\r")
+                parsed = parse_logcat_line(line, log_format) if needs_parse else None
+                if spec.matches(line, parsed):
+                    hits.append((line_no, byte_off))
         return _filter_cache.put(key, {"hits": hits, "truncated": truncated})
 
     hits = []

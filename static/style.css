@@ -4,6 +4,7 @@
    luminosas no tema escuro para manter o contraste.
    --------------------------------------------------------------------------- */
 :root {
+  --sec-head-h: 26px;
   --bg: #f0f0f0;
   --bg-panel: #ffffff;
   --bg-alt: #f7f7f7;
@@ -216,22 +217,40 @@ button.on-toggle { background: var(--accent); color: var(--accent-fg); border-co
 .dev-item .k { color: var(--fg-dim); font-size: 10.5px; text-transform: uppercase; letter-spacing: .02em; }
 .dev-item .v { font-family: var(--mono); font-size: 11.5px; word-break: break-word; user-select: text; }
 .dev-empty { padding: 10px; color: var(--fg-dim); }
+/* Associacao clicavel: leva direto a busca daquele PID ou TAG. */
+.dev-item.assoc { cursor: pointer; }
+.dev-item.assoc:hover { background: var(--bg-hover); }
+.assoc-warn { color: var(--lvl-W); font-style: normal; font-size: 9.5px; }
 
 /* ---- Aba Filtros salvos ---- */
 .filter-list { list-style: none; margin: 0; padding: 4px 6px; overflow: auto; flex: 1; }
 .filter-list li {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 6px;
-  padding: 4px 6px;
+  padding: 5px 6px;
   border-radius: 3px;
   cursor: pointer;
 }
+.filter-body { flex: 1; min-width: 0; }
 .filter-list li:hover { background: var(--bg-hover); }
-.filter-list li.selected { background: var(--accent); color: var(--accent-fg); }
-.filter-list li.selected .filter-meta { color: var(--accent-fg); opacity: .85; }
-.filter-list .filter-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.filter-list .filter-meta { font-size: 10px; color: var(--fg-dim); }
+.filter-list li.selected { outline: 1px solid var(--accent); outline-offset: -1px; }
+/* Filtro ativo: o botao fica ligado e o conjunto vira uma secao de resultados. */
+.filter-list li.on { background: color-mix(in srgb, var(--accent) 20%, transparent); }
+.filter-list li.on .filter-name { font-weight: 600; }
+.filter-onoff { margin-top: 2px; }
+.filter-onoff { color: var(--accent); font-size: 10px; flex: 0 0 auto; }
+/* O nome aparece inteiro, quebrando linha se precisar: e ele que identifica o
+   filtro na lista. O resumo vem abaixo, um no por linha. */
+.filter-list .filter-name { line-height: 1.35; word-break: break-word; }
+.filter-list .filter-meta {
+  font-size: 10.5px;
+  color: var(--fg-dim);
+  font-family: var(--mono);
+  line-height: 1.4;
+  word-break: break-word;
+}
+.filter-ou { color: var(--accent); font-style: normal; font-weight: 600; }
 .filter-list .neg { color: var(--lvl-E); font-weight: 700; }
 
 /* ---- Area de conteudo / abas de arquivo ---- */
@@ -396,6 +415,32 @@ button.on-toggle { background: var(--accent); color: var(--accent-fg); border-co
   font-size: 11.5px;
 }
 .log-table.wrap { width: 100%; }
+/* Cada celula de largura fixa carrega a largura no proprio conteudo: em tabela
+   de layout automatico, largura no <td> e so uma sugestao. */
+.cell {
+  display: inline-block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: top;
+}
+/* A largura vive no <col>; o span cuida do corte com reticencias. */
+.col-n    { width: var(--w-n); }
+.col-file { width: var(--w-file); }
+.col-lvl  { width: var(--w-lvl); }
+.col-time { width: var(--w-time); }
+.col-pid  { width: var(--w-pid); }
+.col-tid  { width: var(--w-tid); }
+.col-tag  { width: var(--w-tag); }
+
+.cell-n    { width: var(--w-n);    text-align: right; }
+.cell-file { width: var(--w-file); }
+.cell-lvl  { width: var(--w-lvl);  text-align: center; }
+.cell-time { width: var(--w-time); }
+.cell-pid  { width: var(--w-pid); }
+.cell-tid  { width: var(--w-tid);  text-align: right; }
+.cell-tag  { width: var(--w-tag); }
+
 .log-table thead th {
   position: sticky;
   top: 0;
@@ -410,6 +455,18 @@ button.on-toggle { background: var(--accent); color: var(--accent-fg); border-co
   font-weight: 600;
   white-space: nowrap;
 }
+/* Alca de redimensionamento na borda direita do cabecalho. */
+.col-resize {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  width: 7px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 3;
+}
+.col-resize:hover { background: var(--accent); }
+body.resizing-col { cursor: col-resize; user-select: none; }
 .log-table td {
   padding: 1px 6px;
   border-right: 1px solid var(--border-soft);
@@ -664,10 +721,10 @@ mark.hl-7, .hl-chip.hl-7, .hl-swatch.hl-7, .fd-term.hl-7 { background: #fcc2d7; 
 .badge-E { background: #dc2626; }
 .badge-F, .badge-A { background: #7f1d1d; }
 
-/* ---- Janela de resultados da busca no arquivo inteiro ---- */
+/* ---- Janela de resultados: uma secao por busca, colapsavel ---- */
 .find-dock {
   flex: 0 0 auto;
-  height: 240px;
+  height: 260px;
   display: flex;
   flex-direction: column;
   min-height: 90px;
@@ -681,32 +738,113 @@ mark.hl-7, .hl-chip.hl-7, .hl-swatch.hl-7, .fd-term.hl-7 { background: #fcc2d7; 
   align-items: center;
   gap: 8px;
   padding: 4px 8px;
-  background: var(--bg-alt);
-  border-bottom: 1px solid var(--border-soft);
+  background: var(--bg-header);
+  border-bottom: 1px solid var(--border);
   font-size: 11.5px;
   flex: 0 0 auto;
-  flex-wrap: wrap;
 }
 .fd-head button { font-size: 11px; padding: 1px 7px; }
-.fd-err { color: var(--lvl-E); }
+.fd-hint { color: var(--fg-dim); font-size: 10.5px; }
 .fd-spacer { flex: 1; }
-.fd-legend { display: flex; gap: 4px; flex-wrap: wrap; }
+.fd-sections { flex: 1; overflow: auto; }
+
+.fd-section { border-bottom: 1px solid var(--border-soft); }
+/* Colapsada, a secao mostra so as palavras e a contagem — o resumo pedido. */
+.fd-section.collapsed .fd-list { display: none; }
+.fd-sec-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  background: var(--bg-alt);
+  font-size: 11.5px;
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  /* Altura fixa: a linha de cabecalho da tabela gruda logo abaixo dela, e uma
+     altura variavel faria as duas se sobreporem. */
+  height: var(--sec-head-h);
+  flex-wrap: nowrap;
+  overflow: hidden;
+}
+.fd-chips { overflow-x: auto; scrollbar-width: none; }
+.fd-chips::-webkit-scrollbar { display: none; }
+.fd-marked > .fd-sec-head { background: color-mix(in srgb, var(--accent) 12%, var(--bg-alt)); }
+.fd-toggle {
+  border: none;
+  background: none;
+  color: var(--fg-dim);
+  padding: 0 2px;
+  font-size: 12px;
+}
+.fd-chips { display: flex; gap: 4px; flex-wrap: nowrap; }
 .fd-term {
   padding: 0 6px;
   border-radius: 3px;
   font-family: var(--mono);
   font-size: 10.5px;
 }
-.fd-list { flex: 1; overflow: auto; font-family: var(--mono); font-size: 11.5px; }
-.fd-row { display: flex; gap: 8px; padding: 1px 8px; cursor: pointer; white-space: pre; }
-.fd-row:hover { background: var(--bg-hover); }
-.fd-row.on { background: var(--row-selected); color: var(--row-selected-fg); }
-.fd-n { color: var(--fg-dim); min-width: 78px; text-align: right; user-select: none; }
-.fd-row.on .fd-n { color: inherit; }
-.fd-tag { color: var(--accent); margin-right: 8px; }
-.fd-row.on .fd-tag { color: inherit; }
-.fd-txt { flex: 1; min-width: 0; }
-.fd-empty { padding: 12px; color: var(--fg-dim); font-family: system-ui, sans-serif; }
+.fd-term-plain { background: var(--bg-header); color: var(--fg-dim); }
+/* Bandeira que identifica a secao dos filtros salvos. */
+.fd-term-flag {
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-weight: 700;
+  letter-spacing: .03em;
+}
+/* Rotulo do campo dentro da etiqueta: TAG, PID, TID... */
+.fd-fieldflag {
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  opacity: .65;
+  margin-right: 4px;
+}
+.fd-count { color: var(--fg-dim); font-size: 11px; white-space: nowrap; }
+.fd-err { color: var(--lvl-E); }
+.fd-check { display: flex; align-items: center; gap: 3px; font-size: 11px; color: var(--fg-dim); }
+.fd-page, .fd-close, .fd-clear { font-size: 11px; padding: 0 6px; }
+
+/* O texto dos resultados e selecionavel com o mouse, inclusive atravessando
+   varias linhas, para copiar e colar. O numero da linha fica de fora para nao
+   sujar o que foi copiado. */
+/* Sem overflow proprio: quem rola e .fd-sections, e e a ele que os cabecalhos
+   grudam. Um scroll aqui criaria um segundo contexto e o sticky prenderia a
+   thead a uma caixa que sai de vista. */
+.fd-list { font-family: var(--mono); font-size: 11.5px; user-select: text; }
+/* Os resultados usam a mesma tabela do log: mesmo cabecalho e mesmas larguras
+   de coluna. Nada de display:flex aqui — numa <tr> isso desmancha as colunas e
+   o cabecalho deixa de bater com o corpo. */
+.fd-table { font-size: 11.5px; }
+.fd-table thead th { top: var(--sec-head-h); z-index: 3; }
+/* O cursor de texto sinaliza que o clique simples serve para selecionar; a
+   navegacao e no duplo clique. */
+tr.fd-row { cursor: text; }
+.log-table td.c-text { user-select: text; }
+tr.fd-row:hover td { background: var(--bg-hover); }
+tr.fd-row.on td { background: var(--row-selected); color: var(--row-selected-fg); }
+tr.fd-row.on .proc-name { color: inherit; }
+.fd-flag { margin-right: 6px; }
+.fd-out { color: var(--fg-dim); font-style: italic; }
+.fd-more, .fd-empty { padding: 6px 10px; color: var(--fg-dim); font-family: system-ui, sans-serif; font-size: 11px; }
+td.c-file { color: var(--accent); }
+
+/* ---- Marca de nivel: pinta a linha em vez de esconder as outras ---- */
+tr.lvl-mark { box-shadow: inset 3px 0 0 var(--mark-color); }
+tr.lvl-mark td { background: color-mix(in srgb, var(--mark-color) 13%, transparent); }
+tr.selected.lvl-mark td { background: var(--row-selected); }
+.mk-V { --mark-color: #6b7280; }
+.mk-D { --mark-color: #2563eb; }
+.mk-I { --mark-color: #16a34a; }
+.mk-W { --mark-color: #d97706; }
+.mk-E { --mark-color: #dc2626; }
+.mk-F, .mk-A { --mark-color: #7f1d1d; }
+
+/* Linha escolhida para exportar. */
+tr.is-marked td.c-n {
+  background: var(--row-bookmark);
+  font-weight: 700;
+}
 
 /* Cabecalho da linha do tempo, com o botao de fechar. */
 .tl-head { display: flex; align-items: center; gap: 8px; padding-bottom: 3px; }
@@ -715,14 +853,99 @@ mark.hl-7, .hl-chip.hl-7, .hl-swatch.hl-7, .fd-term.hl-7 { background: #fcc2d7; 
 /* Caixa "ir para a linha". */
 .goto-line { width: 74px; font-size: 11px; text-align: right; }
 
-/* Nome do arquivo nos resultados, quando a busca cobre varios arquivos. */
-.fd-file {
+/* ---- Editor de filtro composto ---- */
+.fd-nodes { display: flex; flex-direction: column; gap: 10px; }
+.fd-node {
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  padding: 6px 10px 10px;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.fd-node legend {
+  font-size: 11px;
+  color: var(--fg-dim);
+  padding: 0 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.fd-node-del { border: none; background: none; color: var(--fg-dim); cursor: pointer; font-size: 13px; }
+.fd-node-del:hover { color: var(--lvl-E); }
+.dialog-hint { margin: 0; font-size: 11px; color: var(--fg-dim); line-height: 1.5; }
+.dialog-hint code { background: var(--bg-header); padding: 0 4px; border-radius: 2px; font-family: var(--mono); }
+
+/* ---- Aparelhos ligados na USB ---- */
+.usb-list { padding: 0 6px; max-height: 40%; overflow: auto; flex: 0 0 auto; }
+.usb-check { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--fg-dim); }
+.usb-dev {
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  padding: 6px 8px;
+  margin-bottom: 6px;
+  background: var(--bg-alt);
+}
+.usb-dev.usb-off { opacity: .8; border-style: dashed; }
+.usb-title { font-weight: 600; font-size: 12px; margin-bottom: 4px; }
+.usb-row { display: flex; gap: 6px; font-size: 11px; padding: 1px 0; }
+.usb-row .k { color: var(--fg-dim); flex: 0 0 42%; }
+.usb-row .v { font-family: var(--mono); word-break: break-word; }
+.usb-err { color: var(--lvl-E); font-size: 11px; }
+.usb-capture { width: 100%; margin-top: 6px; font-size: 11px; }
+
+/* Aparelho a que pertence a pasta aberta. */
+.root-device {
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--fg);
+  white-space: nowrap;
+}
+.root-device[hidden] { display: none; }
+
+/* Origem e paginacao no cabecalho da secao de resultados. */
+.fd-origin {
   color: var(--accent);
-  min-width: 150px;
-  max-width: 150px;
+  font-size: 10.5px;
+  max-width: 190px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   flex: 0 0 auto;
 }
-.fd-row.on .fd-file { color: inherit; }
+.fd-pagina { color: var(--fg-dim); font-size: 10.5px; white-space: nowrap; }
+
+/* ---- Seletor de pasta ---- */
+.browse-body { padding: 10px; display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+.browse-shortcuts { display: flex; gap: 4px; flex-wrap: wrap; }
+.browse-shortcut { font-size: 11px; padding: 2px 8px; }
+.browse-path { display: flex; gap: 4px; }
+.browse-path input { flex: 1; font-family: var(--mono); font-size: 11.5px; }
+.browse-path button { padding: 3px 8px; }
+.browse-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  height: 260px;
+  overflow: auto;
+  background: var(--bg-panel);
+}
+.browse-dir { padding: 3px 6px; border-radius: 3px; cursor: pointer; white-space: nowrap; }
+.browse-dir:hover { background: var(--bg-hover); }
+.browse-empty { padding: 8px; color: var(--fg-dim); font-size: 11.5px; }
+.browse-err { color: var(--lvl-E); }
+.browse-info { margin: 0; font-size: 11px; color: var(--fg-dim); }
+
+/* ---- Coleta ao vivo ---- */
+.usb-live { margin-top: 6px; }
+.live-state { font-size: 11px; padding: 2px 0; }
+.live-coletando { color: var(--lvl-I); }
+.live-pausada { color: var(--lvl-W); }
+.live-btns { display: flex; gap: 4px; flex-wrap: wrap; }
+.live-btns button { font-size: 11px; padding: 2px 7px; flex: 1; }
+.live-filter-spec { width: 100%; font-size: 11px; font-family: var(--mono); margin-bottom: 4px; }

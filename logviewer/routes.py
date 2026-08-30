@@ -1,10 +1,11 @@
+import json
 import os
 import re
 
 from flask import Blueprint, jsonify, request
 
-from . import analysis, deviceinfo, glossary
-from .fsops import PathError, list_tree, resolve_within_root
+from . import analysis, deviceinfo, devices, glossary
+from .fsops import PathError, browse, list_tree, resolve_within_root
 from .logline import scan_fields
 from .reader import cached_format, columns_for, count_lines, detect_encoding, read_file
 from .search import RegexError, gather_folder_files, search_files
@@ -199,20 +200,39 @@ def get_filtered():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
-    try:
-        spec = analysis.FilterSpec(
-            levels=[v for v in request.args.get("levels", "").split(",") if v],
-            tag=request.args.get("tag") or None,
-            text=request.args.get("text") or None,
-            pid=request.args.get("pid") or None,
-            tid=request.args.get("tid") or None,
-            uid=request.args.get("uid") or None,
-            raw=request.args.get("raw") or None,
-            negate=request.args.get("negate", "false").lower() == "true",
-            case_sensitive=request.args.get("case", "false").lower() == "true",
+    case_sensitive = request.args.get("case", "false").lower() == "true"
+
+    def build(src):
+        levels = src.get("levels")
+        if isinstance(levels, str):
+            levels = [v for v in levels.split(",") if v]
+        return analysis.FilterSpec(
+            levels=levels or None,
+            tag=src.get("tag") or None,
+            # `text` tambem pode vir repetido, como `raw`.
+            text=(src.getlist("text") if hasattr(src, "getlist") else src.get("text")) or None,
+            pid=src.get("pid") or None,
+            tid=src.get("tid") or None,
+            uid=src.get("uid") or None,
+            # `raw` pode vir repetido: todas as palavras na mesma linha.
+            raw=(src.getlist("raw") if hasattr(src, "getlist") else src.get("raw")) or None,
+            negate=str(src.get("negate", "")).lower() == "true",
+            case_sensitive=case_sensitive,
         )
-    except re.error as e:
-        return jsonify({"error": f"Regex invalida: {e}"}), 400
+
+    try:
+        # `groups` e uma lista JSON de nos combinados em OU, para consultas do
+        # tipo "esta TAG com estas palavras OU aquele PID com aquelas".
+        groups_raw = request.args.get("groups")
+        if groups_raw:
+            groups = json.loads(groups_raw)
+            if not isinstance(groups, list) or not groups:
+                return jsonify({"error": "Parametro 'groups' invalido."}), 400
+            spec = analysis.MultiSpec([build(g) for g in groups if isinstance(g, dict)])
+        else:
+            spec = build(request.args)
+    except (re.error, ValueError) as e:
+        return jsonify({"error": f"Filtro invalido: {e}"}), 400
 
     if spec.empty:
         return jsonify({"error": "Informe ao menos um criterio de filtro."}), 400
@@ -228,6 +248,126 @@ def get_filtered():
     result["format"] = log_format
     result["total_lines"] = count_lines(full_path)
     return jsonify(result)
+
+
+@api.get("/browse")
+def get_browse():
+    """Lista as subpastas de um caminho, para o seletor de pasta."""
+    try:
+        result = browse(request.args.get("path") or None)
+    except PathError as e:
+        return jsonify({"error": str(e)}), 400
+
+    # Atalhos para os lugares que fazem sentido comecar.
+    shortcuts = []
+    for label, target in (
+        ("Pasta de logs", os.environ.get("LOG_ROOT")),
+        ("Capturas USB", devices.DEFAULT_CAPTURE_ROOT),
+        ("Minha pasta", os.path.expanduser("~")),
+    ):
+        if target and os.path.isdir(target):
+            shortcuts.append({"label": label, "path": os.path.realpath(target)})
+    result["shortcuts"] = shortcuts
+    return jsonify(result)
+
+
+@api.get("/config")
+def get_config():
+    """Configuracao do servidor que a interface precisa conhecer: a pasta de
+    logs padrao (dentro do container e um volume montado do host) e onde as
+    capturas sao gravadas."""
+    return jsonify({
+        "default_root": os.environ.get("LOG_ROOT") or "",
+        "capture_root": devices.DEFAULT_CAPTURE_ROOT,
+        "adb": devices.adb_path(),
+        "adb_host": devices.ADB_HOST,
+        "in_container": os.path.exists("/.dockerenv"),
+    })
+
+
+@api.get("/usb_devices")
+def get_usb_devices():
+    """Aparelhos Android ligados na USB, com o que identifica cada um."""
+    try:
+        found = devices.list_devices()
+    except devices.AdbError as e:
+        return jsonify({"error": str(e), "adb": devices.adb_path()}), 400
+
+    out = []
+    for dev in found:
+        try:
+            out.append(devices.describe(dev["serial"]))
+        except devices.AdbError as e:
+            out.append({**dev, "identity": None, "error": str(e)})
+    return jsonify({
+        "devices": out,
+        "adb": devices.adb_path(),
+        "labels": devices.IDENTITY_LABELS,
+        "capture_root": devices.DEFAULT_CAPTURE_ROOT,
+    })
+
+
+@api.post("/usb_capture")
+def post_usb_capture():
+    """Despeja os logs de um aparelho numa pasta so dele, para ser aberta como
+    qualquer outra pasta de log."""
+    serial = (request.args.get("serial") or "").strip()
+    with_bugreport = request.args.get("bugreport", "false").lower() == "true"
+    root = request.args.get("dest") or None
+    buffers = [b for b in request.args.get("buffers", "").split(",") if b] or None
+
+    try:
+        result = devices.capture(serial, root=root, with_bugreport=with_bugreport,
+                                 buffers=buffers)
+    except devices.AdbError as e:
+        return jsonify({"error": str(e)}), 400
+    except OSError as e:
+        return jsonify({"error": f"Erro gravando a captura: {e}"}), 500
+    return jsonify(result)
+
+
+@api.get("/live_status")
+def get_live_status():
+    """Estado das coletas ao vivo em andamento."""
+    try:
+        return jsonify({"sessions": devices.live_status(
+            request.args.get("serial") or None)})
+    except devices.AdbError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@api.post("/live")
+def post_live():
+    """Comanda a coleta ao vivo: iniciar, pausar, retomar, parar ou reiniciar."""
+    action = (request.args.get("action") or "").strip()
+    serial = (request.args.get("serial") or "").strip()
+    try:
+        if action == "start":
+            result = devices.live_start(
+                serial,
+                filterspec=request.args.get("filter"),
+                buffers=[b for b in request.args.get("buffers", "").split(",") if b],
+            )
+        elif action == "pause":
+            result = devices.live_pause(serial)
+        elif action == "resume":
+            result = devices.live_resume(serial)
+        elif action == "stop":
+            result = devices.live_stop(serial)
+        elif action == "restart":
+            devices.live_stop(serial)
+            result = devices.live_start(
+                serial,
+                filterspec=request.args.get("filter"),
+                buffers=[b for b in request.args.get("buffers", "").split(",") if b],
+            )
+        else:
+            return jsonify({"error": f"Acao desconhecida: {action!r}"}), 400
+    except devices.AdbError as e:
+        return jsonify({"error": str(e)}), 400
+    except OSError as e:
+        return jsonify({"error": f"Erro na coleta: {e}"}), 500
+    return jsonify(result or {"serial": serial, "state": "encerrada"})
 
 
 @api.get("/glossary")

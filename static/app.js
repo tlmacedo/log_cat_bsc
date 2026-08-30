@@ -7,7 +7,7 @@
  */
 
 const LEVELS = ["V", "D", "I", "W", "E", "F"];
-const PAGE_SIZES = [500, 2000, 5000, 10000, 20000];
+const PAGE_SIZES = [500, 2000, 5000, 10000, 20000, 50000];
 const DEFAULT_PAGE_SIZE = 2000;
 
 const state = {
@@ -22,6 +22,9 @@ const state = {
   panes: [null, null, null],
   focusedPane: 0,
   syncTime: true,
+  // Aparelho USB de onde veio a pasta aberta, quando foi uma captura.
+  rootDevice: null,
+  rootDeviceBase: null,
 };
 
 const el = (sel) => document.querySelector(sel);
@@ -146,6 +149,89 @@ el("#sidebarResize").addEventListener("mousedown", (e) => {
 });
 
 // ---------------------------------------------------------------------------
+// Seletor de pasta
+// ---------------------------------------------------------------------------
+// Quem navega e o servidor: o navegador nunca revela o caminho real de uma
+// pasta escolhida pelo usuario, e e o servidor que precisa enxerga-la para ler
+// os logs. Dentro do container isso mostra exatamente o que foi montado.
+
+const browseDialog = el("#browseDialog");
+let browsePathAtual = "";
+
+el("#browseBtn").addEventListener("click", () => {
+  const atual = el("#rootInput").value.trim();
+  browseDialog.hidden = false;
+  openBrowse(atual || (state.config && state.config.default_root) || "");
+});
+
+const fecharBrowse = () => { browseDialog.hidden = true; };
+el("#browseClose").addEventListener("click", fecharBrowse);
+el("#browseCancel").addEventListener("click", fecharBrowse);
+browseDialog.addEventListener("click", (e) => { if (e.target === browseDialog) fecharBrowse(); });
+
+el("#browseUp").addEventListener("click", () => {
+  if (browseParent) openBrowse(browseParent);
+});
+el("#browseGo").addEventListener("click", () => openBrowse(el("#browsePath").value.trim()));
+el("#browsePath").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") openBrowse(el("#browsePath").value.trim());
+});
+el("#browsePick").addEventListener("click", () => {
+  if (!browsePathAtual) return;
+  fecharBrowse();
+  el("#rootInput").value = browsePathAtual;
+  loadRoot();
+});
+
+let browseParent = null;
+
+async function openBrowse(path) {
+  const lista = el("#browseList");
+  lista.innerHTML = '<li class="browse-empty">Carregando...</li>';
+  try {
+    const params = path ? `?path=${encodeURIComponent(path)}` : "";
+    const res = await fetch(`/api/browse${params}`);
+    const data = await res.json();
+    if (!res.ok) {
+      lista.innerHTML = `<li class="browse-empty browse-err">${escapeHtml(data.error)}</li>`;
+      return;
+    }
+    browsePathAtual = data.path;
+    browseParent = data.parent;
+    el("#browsePath").value = data.path;
+    el("#browseUp").disabled = !data.parent;
+
+    lista.innerHTML = data.dirs.length
+      ? data.dirs.map((d) =>
+          `<li class="browse-dir" data-path="${escapeHtml(d.path)}">` +
+          `\u{1F4C1} ${escapeHtml(d.name)}</li>`).join("") +
+        (data.truncated ? '<li class="browse-empty">(lista truncada)</li>' : "")
+      : '<li class="browse-empty">Nenhuma subpasta aqui.</li>';
+
+    // O numero de arquivos ajuda a reconhecer a pasta certa sem entrar nela.
+    el("#browseInfo").textContent = data.files
+      ? `${fmtNum(data.files)} arquivo(s) nesta pasta` +
+        (data.dirs.length ? ` e ${data.dirs.length} subpasta(s)` : "")
+      : `${data.dirs.length} subpasta(s), nenhum arquivo solto aqui`;
+
+    lista.querySelectorAll(".browse-dir").forEach((li) => {
+      li.addEventListener("click", () => openBrowse(li.dataset.path));
+    });
+
+    if (data.shortcuts) {
+      el("#browseShortcuts").innerHTML = data.shortcuts.map((s) =>
+        `<button class="browse-shortcut" data-path="${escapeHtml(s.path)}" ` +
+        `title="${escapeHtml(s.path)}">${escapeHtml(s.label)}</button>`).join("");
+      el("#browseShortcuts").querySelectorAll(".browse-shortcut").forEach((btn) => {
+        btn.addEventListener("click", () => openBrowse(btn.dataset.path));
+      });
+    }
+  } catch (err) {
+    lista.innerHTML = `<li class="browse-empty browse-err">Falha: ${escapeHtml(err)}</li>`;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Arvore de arquivos
 // ---------------------------------------------------------------------------
 
@@ -158,25 +244,61 @@ const ROOT_KEY = "logviewer.lastRoot";
 const lastRoot = store(ROOT_KEY, "");
 if (lastRoot) el("#rootInput").value = lastRoot;
 
+/** No container a pasta de logs e um volume montado; sem isso o campo abriria
+ *  vazio e o usuario teria de adivinhar o caminho de dentro do container.
+ *
+ *  A pasta lembrada da sessao anterior pode nao existir no ambiente atual —
+ *  e o caso classico de ter usado o app direto e depois subir o container, em
+ *  que o caminho do host nao existe la dentro. Nesse caso caimos na pasta
+ *  padrao em vez de deixar o erro na tela. */
+fetch("/api/config").then(async (r) => {
+  const cfg = await r.json();
+  state.config = cfg;
+  const salvo = el("#rootInput").value.trim();
+
+  if (salvo && await loadRoot()) return;
+  if (!cfg.default_root || cfg.default_root === salvo) return;
+
+  el("#rootInput").value = cfg.default_root;
+  if (await loadRoot() && salvo) {
+    setStatus(`A pasta "${salvo}" nao existe neste ambiente; abri ${cfg.default_root}.`);
+  }
+}).catch(() => { /* sem config o app segue como antes */ });
+
+/** Carrega a arvore da pasta informada. Devolve true se deu certo. */
 async function loadRoot() {
   const root = el("#rootInput").value.trim();
-  if (!root) return;
+  if (!root) return false;
   state.root = root;
-  persist(ROOT_KEY, root);
+  // Trocar para uma pasta fora da captura desfaz o vinculo com o aparelho.
+  if (state.rootDevice && !(state.rootDeviceBase && root.startsWith(state.rootDeviceBase))) {
+    setRootDevice(null);
+  }
   setStatus("Carregando arvore...");
   treeEl.innerHTML = "";
   try {
     const res = await fetch(`/api/tree?root=${encodeURIComponent(root)}`);
     const data = await res.json();
     if (!res.ok) {
-      setStatus(data.error || "Erro ao carregar pasta", true);
-      return;
+      // Dentro do container so existe o que foi montado; dizer isso evita o
+      // usuario ficar procurando um caminho do host que nunca vai aparecer.
+      const dica = state.config && state.config.in_container
+        ? ` O app esta rodando em container e so enxerga a pasta montada` +
+          `${state.config.default_root ? " (" + state.config.default_root + ")" : ""}.`
+        : "";
+      setStatus((data.error || "Erro ao carregar pasta") + dica, true);
+      return false;
     }
+    // So guarda o caminho depois de saber que ele funciona: guardar antes fazia
+    // um caminho invalido voltar a cada recarga da pagina.
+    persist(ROOT_KEY, root);
     renderTree(data.entries);
     setStatus(`${data.entries.length} itens` +
       (data.truncated ? ` (truncado em ${data.max_entries})` : ""));
+    return true;
   } catch (err) {
     setStatus("Falha na requisicao: " + err, true);
+    return false;
   }
 }
 
@@ -270,7 +392,7 @@ function newTab(path) {
     highlightTags: new Set(),
     highlightPids: new Set(),
     liveFilter: "",
-    activeFilterId: null,
+    activeFilterIds: new Set(),
     wrapText: false,
     // Estado de interacao.
     selected: new Set(),
@@ -292,17 +414,23 @@ function newTab(path) {
     timeRange: null,
     // Blocos de stack trace abertos (por padrao ficam dobrados).
     openTraces: new Set(),
+    // Segue o fim do arquivo enquanto ele cresce (coleta ao vivo) e mantem a
+    // visao na ultima linha a cada atualizacao.
+    follow: false,
+    autoScroll: false,
     // Linha do tempo: fechada ate ser pedida.
     timelineOpen: false,
-    // Janela de resultados da busca no arquivo inteiro.
+    // Janela de resultados: uma secao por busca feita.
     findOpen: false,
-    findLoading: false,
-    findResults: null,
-    findQuery: "",
-    findError: null,
+    findSections: [],
     findHeight: null,
     findScope: "current",
-    // Cores atribuidas a cada palavra do filtro.
+    colorCursor: 0,
+    // Linhas escolhidas para exportar, e o estado da secao que as mostra.
+    exportMarks: new Set(),
+    markedCollapsed: false,
+    markedExport: false,
+    // Cores atribuidas a cada palavra em uso.
     filterTerms: [],
   };
 }
@@ -346,6 +474,9 @@ function setActiveTab(id) {
   state.panes[state.focusedPane] = id;
   renderTabs();
   renderPanels();
+  // Filtros ativos e associacoes sao por aba; ambos refletem a aba atual.
+  renderFilterList();
+  renderDeviceInfo();
 }
 
 function activeTab() {
@@ -449,6 +580,11 @@ async function loadFileContent(tab, { tail = false, offset = 0, limit = null, sc
   if (tail) params.set("tail", "true");
   else params.set("offset", offset);
 
+  // Onde a rolagem estava, para nao jogar o usuario de volta ao topo a cada
+  // atualizacao do modo "Seguir".
+  const painelAtual = panelsEl.querySelector(`[data-panel-id="${tab.id}"] .log-wrap`);
+  const rolagemAnterior = painelAtual ? painelAtual.scrollTop : null;
+
   setStatus("Carregando " + tab.path.split("/").pop() + "...");
   let data;
   try {
@@ -474,8 +610,10 @@ async function loadFileContent(tab, { tail = false, offset = 0, limit = null, sc
   tab.format = data.format || null;
   tab.mode = data.mode || "range";
   tab.offset = data.offset || 0;
-  tab.limit = effectiveLimit;
   tab.hasMore = !!data.has_more;
+  // `tab.limit` e a escolha do usuario no seletor e so muda por la; um salto
+  // carrega uma janela maior sem baguncar o que o seletor mostra.
+  if (!limit) tab.limit = effectiveLimit;
   const cols = data.columns || [];
   tab.lines = data.lines.map((text, i) => ({
     n: tab.offset + i + 1,
@@ -501,13 +639,48 @@ async function loadFileContent(tab, { tail = false, offset = 0, limit = null, sc
   setStatus(`${tab.path.split("/").pop()}: linhas ${fmtNum(tab.offset + 1)}-` +
     `${fmtNum(tab.offset + tab.lines.length)} de ${fmtNum(tab.totalLines)}` +
     (tab.format ? ` | formato ${tab.format}` : ""));
-  if (scrollToLine) scrollLogToLine(tab, scrollToLine);
+  if (scrollToLine) {
+    scrollLogToLine(tab, scrollToLine);
+  } else if (tab.autoScroll) {
+    scrollToEnd(tab);
+  } else if (rolagemAnterior !== null && tail) {
+    // Atualizacao do "Seguir" sem autoscroll: mantem onde o usuario estava.
+    restoreScroll(tab, rolagemAnterior);
+  }
+}
+
+/** Leva a tabela ate a ultima linha carregada. */
+function scrollToEnd(tab) {
+  requestAnimationFrame(() => {
+    for (const panel of panelsEl.querySelectorAll(`[data-panel-id="${tab.id}"]`)) {
+      const wrap = panel.querySelector(".log-wrap");
+      if (!wrap) continue;
+      suppressScrollHide = true;
+      wrap.scrollTop = wrap.scrollHeight;
+      setTimeout(() => { suppressScrollHide = false; }, 0);
+    }
+  });
+}
+
+function restoreScroll(tab, top) {
+  requestAnimationFrame(() => {
+    for (const panel of panelsEl.querySelectorAll(`[data-panel-id="${tab.id}"]`)) {
+      const wrap = panel.querySelector(".log-wrap");
+      if (!wrap) continue;
+      suppressScrollHide = true;
+      wrap.scrollTop = top;
+      setTimeout(() => { suppressScrollHide = false; }, 0);
+    }
+  });
 }
 
 async function jumpToLine(tab, lineNumber) {
-  const offset = Math.max(0, lineNumber - Math.floor(tab.limit / 2) - 1);
+  // A linha de destino fica no meio, com pelo menos JUMP_CONTEXT linhas de
+  // cada lado: quem vem de um resultado precisa do que veio antes e depois.
+  const span = Math.max(JUMP_CONTEXT * 2 + 1, tab.limit);
+  const offset = Math.max(0, lineNumber - 1 - Math.floor(span / 2));
   tab.jumpLine = lineNumber;
-  await loadFileContent(tab, { offset, scrollToLine: lineNumber });
+  await loadFileContent(tab, { offset, limit: span, scrollToLine: lineNumber });
 }
 
 function scrollLogToLine(tab, lineNumber, paneIndex) {
@@ -538,19 +711,73 @@ function scrollLogToLine(tab, lineNumber, paneIndex) {
 
 const FIELD_PREFIXES = {
   "pid:": "pid", "tid:": "tid", "tag:": "tag", "uid:": "uid",
-  "app:": "tag", "text:": "msg", "msg:": "msg",
+  "app:": "pid", "text:": "msg", "msg:": "msg",
   "level:": "level", "lvl:": "level",
 };
 
-function parseLiveFilter(query, caseSensitive) {
-  const terms = [];
-  for (let raw of (query || "").trim().split(/\s+/)) {
-    if (!raw) continue;
+/** Traduz `pid:` e `app:` para os PIDs de verdade.
+ *
+ *  Numero e usado como esta (casamento exato). Texto e procurado no mapa
+ *  PID -> processo: `pid:sbrows` acha o PID de com.sec.android.app.sbrowser.
+ *  Sem isso o usuario precisaria descobrir o numero antes de poder buscar. */
+function resolvePid(tab, value) {
+  if (/^\d+$/.test(value)) return { pattern: `^${value}$`, pids: [value], byName: false };
+  const map = (tab && tab.procMap) || {};
+  const re = safeRegex(value, false);
+  const pids = Object.keys(map).filter((pid) => re.test(map[pid]) || re.test(pid));
+  if (!pids.length) return { pattern: null, pids: [], byName: true };
+  return { pattern: `^(?:${pids.join("|")})$`, pids, byName: true };
+}
+
+/** Quebra uma expressao de palavras-chave na gramatica do app:
+ *
+ *    created for   -> a frase inteira, com o espaco (uma coisa so)
+ *    created|for   -> uma ou outra
+ *    created&for   -> as duas, em qualquer lugar da mesma linha
+ *    a&b|c         -> `a` e mais (`b` ou `c`)
+ *
+ *  Espaco nunca separa termos: faz parte da palavra procurada. Padroes com
+ *  barra invertida ficam intactos — ali o autor escreveu regex de proposito. */
+function splitAndOr(value) {
+  if (value.includes("\\") || !value.includes("&")) {
+    return { groups: [value], words: value.split("|").map((w) => w.trim()).filter(Boolean) };
+  }
+  const groups = value.split("&").map((g) => g.trim()).filter(Boolean);
+  return {
+    groups,
+    words: groups.flatMap((g) => g.split("|")).map((w) => w.trim()).filter(Boolean),
+  };
+}
+
+/** Regex unica equivalente a expressao, para o casamento no cliente (uma linha
+ *  por vez, entao o lookahead aqui e barato). No servidor os grupos de E vao
+ *  separados, porque la a varredura e por bloco e o lookahead custaria caro. */
+function termPattern(value) {
+  const { groups } = splitAndOr(value);
+  if (groups.length < 2) return value;
+  return groups.map((g) => `(?=.*(?:${g}))`).join("") + ".*";
+}
+
+const FIELD_TOKEN = new RegExp(
+  "^-?(?:" + Object.keys(FIELD_PREFIXES).map((p) => p.slice(0, -1)).join("|") + "):",
+  "i");
+
+/** Separa a consulta em campos (tag:, pid:, ...) e a expressao de
+ *  palavras-chave.
+ *
+ *  Os campos sao tokens soltos, delimitados por espaco. Todo o resto volta
+ *  junto, com os espacos preservados, porque `created for` e uma frase e nao
+ *  dois termos. */
+function parseQuery(query, tab) {
+  const fields = [];
+  const rest = [];
+  for (const token of String(query || "").trim().split(/\s+/)) {
+    if (!token) continue;
+    if (!FIELD_TOKEN.test(token)) { rest.push(token); continue; }
+
+    let raw = token;
     let negate = false;
-    if (raw.startsWith("-") && raw.length > 1) {
-      negate = true;
-      raw = raw.slice(1);
-    }
+    if (raw.startsWith("-")) { negate = true; raw = raw.slice(1); }
     let field = null;
     let value = raw;
     for (const [prefix, name] of Object.entries(FIELD_PREFIXES)) {
@@ -561,68 +788,86 @@ function parseLiveFilter(query, caseSensitive) {
       }
     }
     if (!value) continue;
-    terms.push({ field, negate, re: safeRegex(value, caseSensitive) });
+
+    if (field === "pid" || field === "tid") {
+      const r = resolvePid(tab, value);
+      fields.push({ field, negate, value, pattern: r.pattern, pids: r.pids,
+                    unresolved: r.byName && !r.pids.length });
+    } else {
+      fields.push({ field, negate, value, pattern: value });
+    }
   }
-  return terms;
+  return { fields, keywords: rest.join(" ") };
 }
 
-/** Cada palavra buscada ganha uma cor propria, inclusive as alternativas de um
- *  "a|b|c". Assim da para ver, numa linha so, qual dos termos casou. */
-function filterTerms(tab) {
+const MAX_ACTIVE_TERMS = 24;
+
+/** Quebra uma busca nas palavras que a compoem, cada uma com sua cor.
+ *  `start` continua a numeracao de cores de onde a secao anterior parou, para
+ *  que buscas diferentes nao repitam cor. */
+function termsOf(query, start = 0, tab = null) {
   const out = [];
-  let color = 0;
-  for (const term of parseLiveFilter(tab.liveFilter, false)) {
-    if (term.negate) continue;   // termo negado esconde linhas, nao marca nada
-    const src = term.re.source;
-    // Um "a|b|c" simples vira uma cor por alternativa; com parenteses ou
-    // colchetes o "|" pode ser interno ao regex, entao fica uma cor so.
-    const parts = /[()[\]\\]/.test(src) ? [src] : src.split("|").filter(Boolean);
+  let color = start;
+  const { fields, keywords } = parseQuery(query, tab);
+
+  for (const f of fields) {
+    if (f.negate) continue;   // termo negado nao pinta nada
+    // Para pid:/app: pinta o numero resolvido, nao o texto digitado:
+    // "sbrowser" nao aparece na linha, mas "10076" aparece.
+    if (f.pids && f.pids.length) {
+      for (const pid of f.pids.slice(0, 4)) {
+        const proc = (tab && tab.procMap && tab.procMap[pid]) || null;
+        out.push({
+          // O numero sozinho nao diz nada: a etiqueta carrega o processo.
+          pattern: `\\b${pid}\\b`,
+          label: proc ? `${pid} ${shortProc(proc)}` : pid,
+          color: color % HL_COLORS, field: f.field, note: proc,
+        });
+        color++;
+      }
+      continue;
+    }
+    out.push({ pattern: f.value, label: f.value, color: color % HL_COLORS, field: f.field });
+    color++;
+  }
+
+  if (keywords) {
+    // Uma cor por palavra, tanto nas alternativas de "a|b" quanto nos termos
+    // exigidos de "a&b". Com parenteses ou colchetes o "|" pode ser interno ao
+    // regex, entao a expressao fica com uma cor so.
+    const parts = /[()[\]\\]/.test(keywords) ? [keywords] : splitAndOr(keywords).words;
     for (const part of parts) {
-      out.push({ pattern: part, color: color % HL_COLORS });
+      out.push({ pattern: part, label: part, color: color % HL_COLORS });
       color++;
     }
   }
   return out;
 }
 
-function termMatches(term, line) {
-  const c = line.c;
-  let subject;
-  if (!term.field) {
-    subject = line.text;
-  } else if (!c) {
-    // Linha que nao e logcat nao tem campos; um termo por campo nao casa.
-    subject = "";
-  } else if (term.field === "level") {
-    subject = c.level || "";
-  } else {
-    subject = c[term.field] || "";
-  }
-  return term.re.test(subject);
+/** Todas as palavras que devem aparecer coloridas no log: as de cada secao de
+ *  resultado ainda aberta. Assim a cor no log e a mesma da etiqueta na janela
+ *  de baixo. */
+function activeTerms(tab) {
+  const out = [];
+  const seen = new Set();
+  const push = (t) => {
+    if (seen.has(t.pattern) || out.length >= MAX_ACTIVE_TERMS) return;
+    seen.add(t.pattern);
+    out.push(t);
+  };
+  for (const section of tab.findSections || []) section.terms.forEach(push);
+  return out;
 }
 
-function savedFilterMatches(filter, line) {
-  const c = line.c;
-  const cs = !!filter.caseSensitive;
-  if (filter.levels && filter.levels.length) {
-    if (!c || !filter.levels.includes(c.level)) return false;
-  }
-  const fields = [
-    ["tag", filter.tag], ["msg", filter.text],
-    ["pid", filter.pid], ["tid", filter.tid],
-  ];
-  for (const [name, pattern] of fields) {
-    if (!pattern) continue;
-    const re = safeRegex(pattern, cs);
-    const subject = name === "msg" && !c ? line.text : (c ? c[name] || "" : "");
-    if (!re.test(subject)) return false;
-  }
-  return true;
-}
 
+/** Linhas que a tabela de log mostra.
+ *
+ *  A caixa de busca NAO entra aqui de proposito: ela so pinta as palavras no
+ *  log e alimenta as secoes da janela de resultados. O log continua sendo o
+ *  log. Os niveis tambem nao filtram — marcam (ver `levelMarked`). O que ainda
+ *  esconde linha e o que veio do menu de contexto (mostrar/esconder TAG e PID),
+ *  o filtro salvo e o intervalo de tempo, todos acoes explicitas de esconder. */
 function visibleLines(tab) {
-  const terms = parseLiveFilter(tab.liveFilter, false);
-  const filter = state.savedFilters.find((f) => f.id === tab.activeFilterId) || null;
   const range = tab.timeRange;
   const out = [];
   for (const line of tab.lines) {
@@ -632,29 +877,20 @@ function visibleLines(tab) {
       const v = timeValue(c && c.time);
       if (v === null || v < range.from || v > range.to) continue;
     }
-    if (tab.levels.size) {
-      if (!c || !tab.levels.has(c.level)) continue;
-    }
     if (tab.showTags.size && (!c || !tab.showTags.has(c.tag))) continue;
     if (c && tab.hideTags.has(c.tag)) continue;
     if (tab.showPids.size && (!c || !tab.showPids.has(c.pid))) continue;
     if (c && tab.hidePids.has(c.pid)) continue;
 
-    if (filter) {
-      const hit = savedFilterMatches(filter, line);
-      if (filter.negate ? hit : !hit) continue;
-    }
-
-    let ok = true;
-    for (const term of terms) {
-      const hit = termMatches(term, line);
-      if (term.negate ? hit : !hit) { ok = false; break; }
-    }
-    if (!ok) continue;
-
     out.push(line);
   }
   return out;
+}
+
+/** Nivel ligado nos botoes V D I W E F: a linha ganha a cor daquele nivel, no
+ *  log e nas secoes de resultado. Nao esconde nada. */
+function levelMarked(tab, c) {
+  return !!(c && c.level && tab.levels.has(c.level));
 }
 
 function recomputeSearch(tab) {
@@ -777,12 +1013,66 @@ function isHighlighted(tab, line) {
   return (c.tag && tab.highlightTags.has(c.tag)) || (c.pid && tab.highlightPids.has(c.pid));
 }
 
+// ---------------------------------------------------------------------------
+// Colunas: mesma definicao para a tabela de log e para a de resultados, com
+// largura ajustavel arrastando a borda do cabecalho.
+// ---------------------------------------------------------------------------
+
+const COLUMNS = [
+  { key: "n", cls: "c-n", label: "Linha", sigla: null },
+  { key: "file", cls: "c-file", label: "Arquivo", sigla: null },
+  { key: "lvl", cls: "c-lvl", label: "L.", sigla: "L." },
+  { key: "time", cls: "c-time", label: "Hora", sigla: "Hora" },
+  { key: "pid", cls: "c-pid", label: "PID", sigla: "PID" },
+  { key: "tid", cls: "c-tid", label: "TID", sigla: "TID" },
+  { key: "tag", cls: "c-tag", label: "Tag", sigla: "Tag" },
+];
+
+const COL_WIDTHS_KEY = "logviewer.colWidths";
+const DEFAULT_COL_WIDTHS = { n: 74, file: 150, lvl: 20, time: 132, pid: 108, tid: 52, tag: 150 };
+state.colWidths = { ...DEFAULT_COL_WIDTHS, ...store(COL_WIDTHS_KEY, {}) };
+
+/** As larguras viram variaveis CSS: mudar uma redesenha as duas tabelas sem
+ *  precisar refazer o HTML. */
+function applyColWidths() {
+  for (const [key, px] of Object.entries(state.colWidths)) {
+    document.documentElement.style.setProperty(`--w-${key}`, px + "px");
+  }
+}
+applyColWidths();
+
+/** Conteudo de uma celula de largura fixa. O span com largura propria e o que
+ *  segura a coluna: em tabela de layout automatico, largura no <td> e so uma
+ *  sugestao e o conteudo manda. */
+function cell(colKey, html, attrs = "") {
+  return `<span class="cell cell-${colKey}"${attrs}>${html}</span>`;
+}
+
+function tableHeadHtml(withFile) {
+  const cols = COLUMNS.filter((c) => c.key !== "file" || withFile);
+  // O colgroup e o que faz cabecalho e corpo concordarem sobre a largura de
+  // cada coluna; sem ele o navegador redistribui a sobra por conta propria.
+  const colgroup = "<colgroup>" +
+    cols.map((c) => `<col class="col-${c.key}">`).join("") +
+    "<col></colgroup>";
+  const th = cols.map((c) => {
+    const e = c.sigla && glossaryEntry(c.sigla);
+    const title = e ? ` title="${escapeHtml(`${e.sigla} - ${e.nome}: ${e.desc}`)}"` : "";
+    return `<th class="${c.cls}"${title}><span class="cell cell-${c.key}">${c.label}</span>` +
+      `<span class="col-resize" data-col="${c.key}" title="Arraste para redimensionar"></span></th>`;
+  }).join("");
+  return colgroup + `<thead><tr>${th}<th>Texto</th></tr></thead>`;
+}
+
 function rowHtml(tab, line, groups) {
   const c = line.c;
   const classes = ["lvl-" + (c && c.level ? c.level : "none")];
   if (tab.selected.has(line.n)) classes.push("selected");
   if (isHighlighted(tab, line)) classes.push("highlighted");
   if (tab.bookmarks.has(line.n)) classes.push("bookmarked");
+  // Os botoes de nivel pintam a linha em vez de esconder as outras.
+  if (levelMarked(tab, c)) classes.push("lvl-mark", "mk-" + c.level);
+  if (tab.exportMarks.has(line.n)) classes.push("is-marked");
 
   // Bloco de stack trace: a primeira linha vira cabecalho dobravel e as demais
   // ficam escondidas enquanto o bloco estiver fechado.
@@ -806,9 +1096,12 @@ function rowHtml(tab, line, groups) {
     // Linha fora do formato logcat (cabecalho de bugreport, dumpsys, etc):
     // mostra o texto cru ocupando as colunas de conteudo.
     return `<tr class="${classes.join(" ")}" data-line="${line.n}"${groupAttrs}>` +
-      `<td class="c-n">${line.n}</td>` +
-      `<td class="c-lvl"></td><td class="c-time"></td><td class="c-pid"></td>` +
-      `<td class="c-tid"></td><td class="c-tag"></td>` +
+      `<td class="c-n">${cell("n", String(line.n))}</td>` +
+      `<td class="c-lvl">${cell("lvl", "")}</td>` +
+      `<td class="c-time">${cell("time", "")}</td>` +
+      `<td class="c-pid">${cell("pid", "")}</td>` +
+      `<td class="c-tid">${cell("tid", "")}</td>` +
+      `<td class="c-tag">${cell("tag", "")}</td>` +
       `<td class="c-text c-raw">${toggle}${decorateText(line.text, tab)}</td></tr>`;
   }
 
@@ -827,12 +1120,12 @@ function rowHtml(tab, line, groups) {
   // PID espera ver a marcacao onde o valor aparece, nao so na mensagem.
   return `<tr class="${classes.join(" ")}" data-line="${line.n}"${groupAttrs}` +
     ` data-tag="${escapeHtml(c.tag || "")}" data-pid="${escapeHtml(c.pid || "")}">` +
-    `<td class="c-n">${line.n}</td>` +
-    `<td class="c-lvl"${levelTitle(c.level)}>${escapeHtml(c.level || "")}</td>` +
-    `<td class="c-time">${decorateText(c.time || "", tab)}</td>` +
-    `<td class="c-pid"${pidTitle}>${pidCell}</td>` +
-    `<td class="c-tid">${decorateText(c.tid || "", tab)}</td>` +
-    `<td class="c-tag"${tagInfo}>${decorateText(c.tag || "", tab)}</td>` +
+    `<td class="c-n">${cell("n", String(line.n))}</td>` +
+    `<td class="c-lvl">${cell("lvl", escapeHtml(c.level || ""), levelTitle(c.level))}</td>` +
+    `<td class="c-time">${cell("time", decorateText(c.time || "", tab))}</td>` +
+    `<td class="c-pid">${cell("pid", pidCell, pidTitle)}</td>` +
+    `<td class="c-tid">${cell("tid", decorateText(c.tid || "", tab))}</td>` +
+    `<td class="c-tag">${cell("tag", decorateText(c.tag || "", tab), tagInfo)}</td>` +
     `<td class="c-text">${toggle}${decorateText(c.msg ?? line.text, tab)}</td></tr>`;
 }
 
@@ -884,7 +1177,7 @@ function buildPanel(tab, paneIndex) {
 
   // As cores dos termos sao recalculadas a cada render: o filtro pode ter
   // mudado, e a marcacao precisa acompanhar.
-  tab.filterTerms = filterTerms(tab);
+  tab.filterTerms = activeTerms(tab);
   const shown = tab.binary ? [] : visibleLines(tab);
 
   // --- barra de ferramentas -------------------------------------------------
@@ -901,7 +1194,7 @@ function buildPanel(tab, paneIndex) {
     ${paneSelect}
     <input class="live-filter" list="filterHistoryList" value="${escapeHtml(tab.liveFilter)}"
       placeholder="Buscar no arquivo todo (Enter). Ex: sales_code|imei|serialno"
-      title="Enter busca no ARQUIVO INTEIRO e abre a janela de resultados.&#10;&#10;a|b|c  = qualquer uma das palavras (cada uma ganha uma cor)&#10;a b    = a linha precisa ter as duas&#10;-a     = esconde as linhas com 'a' (so na pagina)&#10;Prefixos: tag: pid: tid: app: text: level:&#10;Aceita regex.">
+      title="Enter busca no ARQUIVO INTEIRO e abre a janela de resultados.&#10;&#10;created for   = a frase inteira, com o espaco&#10;created|for   = uma ou outra&#10;created&amp;for   = as duas na mesma linha&#10;&#10;tag:X pid:Y   = filtra o campo (na busca comum o campo casa por conter)&#10;                e as palavras vao no texto da mensagem&#10;Prefixos: tag: pid: tid: uid: app: level:&#10;Cada palavra ganha sua cor. Aceita regex.">
     <select data-act="scope" title="Onde procurar">
       <option value="current"${(tab.findScope || "current") === "current" ? " selected" : ""}>neste arquivo</option>
       <option value="open"${tab.findScope === "open" ? " selected" : ""}>arquivos abertos</option>
@@ -909,7 +1202,7 @@ function buildPanel(tab, paneIndex) {
     </select>
     <button data-act="filesearch" class="primary" title="Buscar (Enter)">Buscar</button>
     <div class="level-toggles">
-      ${LEVELS.map((l) => `<button class="level-toggle${tab.levels.has(l) ? " on" : ""}" data-level="${l}" title="Nivel ${l}">${l}</button>`).join("")}
+      ${LEVELS.map((l) => `<button class="level-toggle${tab.levels.has(l) ? " on" : ""}" data-level="${l}" title="Marcar as linhas de nivel ${l} com a cor do nivel">${l}</button>`).join("")}
     </div>
     <span class="toolbar-sep"></span>
     <button data-act="start" title="Ir para o inicio do arquivo">&#8676; Inicio</button>
@@ -925,6 +1218,12 @@ function buildPanel(tab, paneIndex) {
     <button data-act="find" title="Buscar e destacar nesta pagina (Ctrl+F)">&#128269;</button>
     <button data-act="prevhit" title="Ocorrencia anterior (Ctrl+,)">&#8963;</button>
     <button data-act="nexthit" title="Proxima ocorrencia (Ctrl+.)">&#8964;</button>
+    <label class="toolbar-check" title="Recarregar o fim do arquivo automaticamente — util enquanto uma coleta ao vivo esta gravando">
+      <input type="checkbox" data-act="follow"${tab.follow ? " checked" : ""}> Seguir
+    </label>
+    <label class="toolbar-check" title="Manter a visao na ultima linha a cada atualizacao">
+      <input type="checkbox" data-act="autoscroll"${tab.autoScroll ? " checked" : ""}> Rolar p/ o fim
+    </label>
     <label class="toolbar-check" title="Quebrar linhas longas no espaco horizontal disponivel, em vez de rolar na horizontal">
       <input type="checkbox" data-act="wrap"${tab.wrapText ? " checked" : ""}> Quebrar linha
     </label>
@@ -944,20 +1243,6 @@ function buildPanel(tab, paneIndex) {
     ` | ${fmtNum(tab.offset + 1)}-${fmtNum(tab.offset + tab.lines.length)} de ${fmtNum(tab.totalLines)}` +
     (tab.size != null ? ` | ${fmtSize(tab.size)}` : "") +
     (tab.searchHits.length ? ` | ${tab.searchHits.length} ocorrencia(s)` : "");
-
-  // Filtro sem resultado na pagina: o arquivo tem milhoes de linhas e a busca
-  // util quase sempre e a do arquivo inteiro, entao oferece o caminho.
-  if (!tab.binary && tab.lines.length && !shown.length && tab.liveFilter.trim() && !tab.findOpen) {
-    const hint = document.createElement("div");
-    hint.className = "range-bar";
-    hint.innerHTML = `<span>Nenhuma linha nesta pagina (${fmtNum(tab.offset + 1)}-` +
-      `${fmtNum(tab.offset + tab.lines.length)} de ${fmtNum(tab.totalLines)}). ` +
-      `O termo pode estar em outra parte do arquivo.</span>` +
-      `<button data-act="hint-search">Buscar no arquivo inteiro</button>`;
-    hint.querySelector("[data-act=hint-search]")
-      .addEventListener("click", () => searchWholeFile(tab, 0));
-    panel.appendChild(hint);
-  }
 
   // Barra de intervalo: aparece com duas ou mais linhas selecionadas.
   const rangeBar = buildRangeBar(tab);
@@ -979,15 +1264,9 @@ function buildPanel(tab, paneIndex) {
     wrap.innerHTML = `<div class="empty-state">Nenhuma linha para exibir${tab.lines.length ? " com os filtros atuais" : ""}.</div>`;
   } else {
     const groups = groupTraces(shown);
-    const th = (label, sigla) => {
-      const e = glossaryEntry(sigla);
-      return `<th${e ? ` title="${escapeHtml(`${e.sigla} - ${e.nome}: ${e.desc}`)}"` : ""}>${label}</th>`;
-    };
     wrap.innerHTML =
-      `<table class="log-table${tab.wrapText ? " wrap" : ""}"><thead><tr>` +
-      '<th class="c-n">Linha</th>' + th("L.", "L.") + th("Hora", "Hora") +
-      th("PID", "PID") + th("TID", "TID") + th("Tag", "Tag") + "<th>Texto</th>" +
-      "</tr></thead><tbody>" +
+      `<table class="log-table${tab.wrapText ? " wrap" : ""}">` +
+      tableHeadHtml(false) + "<tbody>" +
       shown.map((l) => rowHtml(tab, l, groups)).join("") +
       "</tbody></table>";
   }
@@ -1057,43 +1336,56 @@ function fmtDelta(ms) {
 // Busca no arquivo inteiro, com os resultados numa janela propria
 // ---------------------------------------------------------------------------
 
-const FIND_PAGE = 500;
+const FIND_PAGE = 1000;
+const MAX_SECTIONS = 12;
 
-/** Monta os parametros de /api/filtered a partir do que esta na caixa de
- *  filtro. Termos sem prefixo viram `raw`: casam com a linha inteira, que e o
- *  que a maioria das linhas de um bugreport exige — elas nem sao logcat. */
-function fileSearchParams(tab) {
+// ---------------------------------------------------------------------------
+// Busca: cada pesquisa vira uma secao na janela de resultados
+// ---------------------------------------------------------------------------
+
+/** Monta os parametros de /api/filtered a partir de uma consulta da caixa de
+ *  busca.
+ *
+ *  Primeiro os campos (tag:, pid:, ...), depois as palavras-chave. Na busca
+ *  comum o campo casa por *conter* o valor — e uma consulta rapida, e digitar
+ *  tag:Telephony para varrer a familia toda e util. No filtro salvo o valor e
+ *  exato, porque ali o criterio foi escrito para ficar.
+ *
+ *  Havendo campo, as palavras vao para `text` (so a mensagem); sem campo
+ *  nenhum, viram `raw` e valem para a linha inteira — unico jeito de alcancar
+ *  as linhas que nem sao logcat. */
+function fileSearchParams(tab, query) {
   const params = new URLSearchParams({ root: state.root, file: tab.path });
-  const terms = parseLiveFilter(tab.liveFilter, false);
-  const bare = [];
-  const byField = { tag: [], msg: [], pid: [], tid: [], uid: [] };
+  const { fields, keywords } = parseQuery(query, tab);
+  const byField = { tag: [], msg: [], pid: [], tid: [], uid: [], level: [] };
   let negated = 0;
-  for (const term of terms) {
-    if (term.negate) { negated++; continue; }
-    if (!term.field) bare.push(term.re.source);
-    else byField[term.field].push(term.re.source);
+  let unresolved = null;
+
+  for (const f of fields) {
+    if (f.negate) { negated++; continue; }
+    if (f.unresolved) { unresolved = f.value; continue; }
+    if (byField[f.field]) byField[f.field].push(f.pattern);
   }
-  // Varios termos no mesmo campo sao E: a linha precisa conter todos.
-  const all = (arr) => arr.map((s) => `(?=.*(?:${s}))`).join("") + ".*";
-  if (bare.length) params.set("raw", bare.length === 1 ? bare[0] : all(bare));
   if (byField.tag.length) params.set("tag", byField.tag.join("|"));
-  if (byField.msg.length) params.set("text", byField.msg.join("|"));
+  if (byField.uid.length) params.set("uid", byField.uid.join("|"));
   if (byField.pid.length) params.set("pid", byField.pid.join("|"));
   if (byField.tid.length) params.set("tid", byField.tid.join("|"));
-  if (byField.uid.length) params.set("uid", byField.uid.join("|"));
-  if (tab.levels.size) params.set("levels", [...tab.levels].join(","));
+  if (byField.level.length) params.set("levels", byField.level.join(","));
+  // text: escrito a mao continua valendo como palavra-chave da mensagem.
+  const words = [...byField.msg];
+  if (keywords) words.push(...splitAndOr(keywords).groups);
 
-  const filter = state.savedFilters.find((f) => f.id === tab.activeFilterId);
-  if (filter) {
-    if (filter.tag) params.set("tag", filter.tag);
-    if (filter.text) params.set("text", filter.text);
-    if (filter.pid) params.set("pid", filter.pid);
-    if (filter.tid) params.set("tid", filter.tid);
-    if (filter.levels && filter.levels.length) params.set("levels", filter.levels.join(","));
-    if (filter.negate) params.set("negate", "true");
-    if (filter.caseSensitive) params.set("case", "true");
-  }
-  return { params, hasCriteria: [...params.keys()].length > 2, negated };
+  const hasField = [...params.keys()].length > 2;
+  // Cada entrada e uma exigencia: a linha precisa casar com todas. O servidor
+  // usa a mais longa para triar e confere as outras so nas candidatas.
+  for (const w of words) params.append(hasField ? "text" : "raw", w);
+
+  return {
+    params,
+    hasCriteria: [...params.keys()].length > 2,
+    negated,
+    unresolved,
+  };
 }
 
 /** Leva o foco para a caixa de busca do painel ativo (Ctrl+F / Ctrl+Shift+F). */
@@ -1113,8 +1405,8 @@ function focusSearchBox(scope) {
 }
 
 /** Busca com escopo em varios arquivos, reaproveitando /api/search. */
-async function searchAcrossFiles(tab, scope) {
-  const params = new URLSearchParams({ root: state.root, pattern: tab.liveFilter.trim() });
+async function searchAcrossFiles(tab, query, scope) {
+  const params = new URLSearchParams({ root: state.root, pattern: query });
   if (scope === "open") {
     params.set("scope", "open");
     params.set("open_files", state.tabs.map((t) => t.path).join(","));
@@ -1125,14 +1417,13 @@ async function searchAcrossFiles(tab, scope) {
   params.set("flags", "i");
   params.set("max_results", 2000);
   params.set("total_max_results", 5000);
-  if (tab.levels.size) params.set("levels", [...tab.levels].join(","));
 
   const res = await fetch(`/api/search?${params}`);
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || "Erro na busca.");
 
-  // Achata os resultados por arquivo numa lista unica, do mesmo formato que a
-  // busca de um arquivo so devolve — assim a janela de resultados e uma so.
+  // Achata os resultados por arquivo numa lista unica, do mesmo formato da
+  // busca de um arquivo so — assim a secao se desenha igual nos dois casos.
   const lines = [], numbers = [], columns = [], files = [];
   for (const fileResult of data.results) {
     for (const m of fileResult.matches || []) {
@@ -1152,45 +1443,89 @@ async function searchAcrossFiles(tab, scope) {
   };
 }
 
-/** Busca unica do app: procura no arquivo inteiro (ou nos arquivos do escopo)
- *  e abre a janela de resultados no rodape do painel. */
-async function searchWholeFile(tab, offset = 0) {
-  const scope = tab.findScope || "current";
-  const query = tab.liveFilter.trim();
-  if (!query && !tab.levels.size) {
+/** Roda a busca e guarda o resultado como mais uma secao da janela de baixo.
+ *  Buscar de novo o mesmo termo atualiza a secao existente em vez de duplicar. */
+async function runSearch(tab, query, { sectionId = null, offset = 0, groups = null,
+                                        filter = null, id = null, savedNames = null,
+                                        colorSource = null } = {}) {
+  query = (query ?? tab.liveFilter).trim();
+  if (!query) {
     setStatus("Digite algo na caixa de busca.", true);
     return;
   }
+  // Um filtro com nos sempre vale no arquivo atual: os nos falam de TAG/PID
+  // deste log.
+  const scope = groups ? "current" : (tab.findScope || "current");
 
-  let params, hasCriteria, negated = 0;
-  if (scope === "current") {
-    ({ params, hasCriteria, negated } = fileSearchParams(tab));
-    if (!hasCriteria) {
-      setStatus("Digite algo na caixa de busca.", true);
-      return;
-    }
-    params.set("offset", offset);
-    params.set("limit", FIND_PAGE);
+  let section = sectionId
+    ? tab.findSections.find((x) => x.id === sectionId)
+    : tab.findSections.find((x) => x.query === query && x.scope === scope);
+
+  if (!section) {
+    // As palavras coloridas de um filtro sao as palavras-chave dos seus nos.
+    const source = colorSource ?? (filter
+      ? filterNodes(filter).map((n) => n.text).filter(Boolean).join(" ")
+      : query);
+    section = {
+      id: id || ("s" + Date.now() + Math.random().toString(36).slice(2, 5)),
+      query,
+      scope,
+      groups,
+      savedNames,
+      terms: termsOf(source, tab.colorCursor || 0, tab),
+      source: tab.path.split("/").pop(),
+      results: null,
+      collapsed: false,
+      exportChecked: false,
+      loading: true,
+      error: null,
+    };
+    tab.colorCursor = ((tab.colorCursor || 0) + section.terms.length) % HL_COLORS;
+    tab.findSections.unshift(section);
+    if (tab.findSections.length > MAX_SECTIONS) tab.findSections.length = MAX_SECTIONS;
+  } else {
+    section.loading = true;
+    section.error = null;
+    if (groups) section.groups = groups;
   }
+
+  // Uma busca nova recolhe as anteriores e fica aberta: com varias secoes
+  // abertas a lista vira uma parede e some o que se acabou de procurar.
+  for (const other of tab.findSections) other.collapsed = other !== section;
+  section.collapsed = false;
 
   saveToHistory(query);
   tab.findOpen = true;
-  tab.findLoading = true;
-  tab.findQuery = query;
-  tab.findScopeUsed = scope;
   refreshPanel(tab);
 
   try {
     if (scope === "current") {
+      let params, hasCriteria = true, unresolved = null;
+      if (section.groups) {
+        params = new URLSearchParams({ root: state.root, file: tab.path });
+        params.set("groups", JSON.stringify(section.groups));
+      } else {
+        ({ params, hasCriteria, unresolved } = fileSearchParams(tab, query));
+      }
+      if (unresolved) {
+        section.error = `Nenhum processo casa com "${unresolved}". ` +
+          (tab.procMap ? "Veja os nomes na coluna PID." : "O mapa de processos ainda esta carregando.");
+        return;
+      }
+      if (!hasCriteria) {
+        section.error = "Consulta vazia.";
+        return;
+      }
+      params.set("offset", offset);
+      params.set("limit", FIND_PAGE);
       const res = await fetch(`/api/filtered?${params}`);
       const data = await res.json();
       if (!res.ok) {
-        tab.findError = data.error || "Erro na busca.";
-        tab.findResults = null;
+        section.error = data.error || "Erro na busca.";
+        section.results = null;
         return;
       }
-      tab.findError = null;
-      tab.findResults = {
+      section.results = {
         lines: data.lines,
         numbers: data.line_numbers,
         columns: data.columns || [],
@@ -1199,118 +1534,327 @@ async function searchWholeFile(tab, offset = 0) {
         offset: data.offset,
         hasMore: data.has_more,
         truncated: data.truncated,
-        negated,
       };
-      setStatus(`${fmtNum(data.matched)} linha(s) encontradas no arquivo inteiro.`);
     } else {
-      tab.findResults = await searchAcrossFiles(tab, scope);
-      tab.findError = null;
-      setStatus(`${fmtNum(tab.findResults.matched)} ocorrencia(s) em ` +
-        `${tab.findResults.filesSearched} arquivo(s).`);
+      section.results = await searchAcrossFiles(tab, query, scope);
     }
+    section.error = null;
+    setStatus(`"${query}": ${fmtNum(section.results.matched)} linha(s).`);
   } catch (err) {
-    tab.findError = "Falha na requisicao: " + err.message;
-    tab.findResults = null;
+    section.error = "Falha na requisicao: " + err.message;
+    section.results = null;
   } finally {
-    tab.findLoading = false;
+    section.loading = false;
     refreshPanel(tab);
   }
 }
 
-/** Janela inferior com as linhas encontradas; clicar leva o log ate a linha. */
+/** Linhas que o usuario marcou para exportar, mais os bookmarks. */
+function markedRows(tab) {
+  const rows = [];
+  const byNumber = new Map(tab.lines.map((l) => [l.n, l]));
+  const numbers = new Set([...tab.exportMarks, ...tab.bookmarks]);
+  for (const n of [...numbers].sort((a, b) => a - b)) {
+    const line = byNumber.get(n);
+    rows.push({
+      n,
+      text: line ? line.text : null,   // null = linha fora da pagina carregada
+      c: line ? line.c : null,
+      marked: tab.exportMarks.has(n),
+      bookmarked: tab.bookmarks.has(n),
+    });
+  }
+  return rows;
+}
+
+// ---------------------------------------------------------------------------
+// Janela de resultados (fica no fluxo do painel, dividindo espaco com o log)
+// ---------------------------------------------------------------------------
+
+/** Distingue um clique de um arrasto para selecionar texto.
+ *
+ *  Usado na tabela de log, onde o clique simples seleciona a linha: sem isso,
+ *  arrastar para copiar um trecho trocaria a linha selecionada no meio da
+ *  selecao. Guarda onde o botao desceu e so trata como clique se o ponteiro
+ *  praticamente nao andou. */
+function clickNotDrag(container, handler) {
+  let down = null;
+  container.addEventListener("mousedown", (e) => { down = [e.clientX, e.clientY]; });
+  container.addEventListener("click", (e) => {
+    const moved = down && (Math.abs(e.clientX - down[0]) > 4 || Math.abs(e.clientY - down[1]) > 4);
+    down = null;
+    // Arrastar (selecionar texto) ou dar duplo clique (selecionar palavra) nao
+    // navega. Um clique parado navega, mesmo que exista selecao anterior na
+    // tela — checar a selecao aqui travaria o clique seguinte.
+    if (moved || e.detail > 1) return;
+    handler(e);
+  });
+}
+
+// Rotulo do campo mostrado na etiqueta, para nao restar duvida se aquela
+// palavra foi procurada na TAG, no PID ou no texto da mensagem.
+const FIELD_LABEL = {
+  tag: "TAG", pid: "PID", tid: "TID", uid: "UID", msg: "TEXTO", level: "NIVEL",
+};
+
+function chipsHtml(section) {
+  const chips = [];
+  if (section.savedNames) {
+    chips.push('<span class="fd-term fd-term-flag">FILTROS SALVOS</span>');
+    for (const name of section.savedNames) {
+      chips.push(`<span class="fd-term fd-term-plain">${escapeHtml(name)}</span>`);
+    }
+  }
+  for (const t of section.terms) {
+    const flag = t.field && FIELD_LABEL[t.field]
+      ? `<b class="fd-fieldflag">${FIELD_LABEL[t.field]}</b>`
+      : "";
+    const title = t.note ? ` title="${escapeHtml(t.note)}"` : "";
+    chips.push(`<span class="fd-term hl-${t.color}"${title}>` +
+      `${flag}${escapeHtml(t.label ?? t.pattern)}</span>`);
+  }
+  return chips.join("");
+}
+
+/** Uma linha de resultado, nas mesmas colunas da tabela de log. */
+function resultRowHtml(tab, row, withFile) {
+  const { n, c, text, file } = row;
+  const classes = ["fd-row", "lvl-" + (c && c.level ? c.level : "none")];
+  if (levelMarked(tab, c)) classes.push("lvl-mark", "mk-" + c.level);
+  if (row.marked) classes.push("is-marked");
+  if (row.active) classes.push("on");
+
+  const fileCell = withFile
+    ? `<td class="c-file">${cell("file", escapeHtml((file || "").split("/").pop()),
+        file ? ` title="${escapeHtml(file)}"` : "")}</td>`
+    : "";
+
+  if (!c) {
+    // Linha fora do formato logcat: o texto cru ocupa a coluna de conteudo.
+    return `<tr class="${classes.join(" ")}" data-line="${n}"` +
+      `${file ? ` data-file="${escapeHtml(file)}"` : ""}>` +
+      `<td class="c-n">${cell("n", fmtNum(n))}</td>${fileCell}` +
+      `<td class="c-lvl">${cell("lvl", "")}</td>` +
+      `<td class="c-time">${cell("time", "")}</td>` +
+      `<td class="c-pid">${cell("pid", "")}</td>` +
+      `<td class="c-tid">${cell("tid", "")}</td>` +
+      `<td class="c-tag">${cell("tag", "")}</td>` +
+      `<td class="c-text c-raw">${row.body ?? decorateText(text || "", tab)}</td></tr>`;
+  }
+
+  const proc = processName(tab, c.pid);
+  const pidCell = decorateText(c.pid || "", tab) +
+    (proc ? ` <span class="proc-name">${escapeHtml(shortProc(proc))}</span>` : "");
+  return `<tr class="${classes.join(" ")}" data-line="${n}"` +
+    `${file ? ` data-file="${escapeHtml(file)}"` : ""}>` +
+    `<td class="c-n">${cell("n", fmtNum(n))}</td>${fileCell}` +
+    `<td class="c-lvl">${cell("lvl", escapeHtml(c.level || ""), levelTitle(c.level))}</td>` +
+    `<td class="c-time">${cell("time", decorateText(c.time || "", tab))}</td>` +
+    `<td class="c-pid">${cell("pid", pidCell, proc ? ` title="PID ${c.pid} - ${escapeHtml(proc)}"` : "")}</td>` +
+    `<td class="c-tid">${cell("tid", decorateText(c.tid || "", tab))}</td>` +
+    `<td class="c-tag">${cell("tag", decorateText(c.tag || "", tab), glossaryTagTitle(c.tag))}</td>` +
+    `<td class="c-text">${row.body ?? decorateText(c.msg ?? text ?? "", tab)}</td></tr>`;
+}
+
+/** Envolve as linhas numa tabela com cabecalho, igual a do log. */
+function resultTableHtml(tab, rows, withFile, wrapText) {
+  return `<table class="log-table fd-table${wrapText ? " wrap" : ""}">` +
+    tableHeadHtml(withFile) + "<tbody>" +
+    rows.map((row) => resultRowHtml(tab, row, withFile)).join("") +
+    "</tbody></table>";
+}
+
+function buildSection(tab, section) {
+  const box = document.createElement("section");
+  box.className = "fd-section" + (section.collapsed ? " collapsed" : "");
+  box.dataset.sectionId = section.id;
+
+  const r = section.results;
+  const count = section.loading
+    ? "buscando..."
+    : section.error
+      ? section.error
+      : r
+        ? `${fmtNum(r.matched)}${r.truncated ? "+" : ""} linha(s)` +
+          (r.files ? ` em ${r.filesSearched} arquivo(s)` : "")
+        : "";
+
+  // De onde vieram os resultados. Com dois aparelhos capturados ou varios
+  // arquivos abertos, a secao precisa dizer a que log ela se refere.
+  const origem = r && r.files
+    ? `${r.filesSearched} arquivo(s)`
+    : (section.source || tab.path.split("/").pop());
+  const aparelho = state.rootDevice && state.rootDevice.modelo
+    ? ` \u00b7 ${state.rootDevice.modelo.value}` : "";
+
+  // Paginacao: quantas linhas desta pagina, de quantas encontradas.
+  const pagina = r && !r.files && r.matched > r.lines.length
+    ? `${fmtNum(r.offset + 1)}-${fmtNum(r.offset + r.lines.length)} de ${fmtNum(r.matched)}`
+    : "";
+
+  box.innerHTML =
+    `<header class="fd-sec-head">` +
+      `<button class="fd-toggle" title="Colapsar/expandir">${section.collapsed ? "▸" : "▾"}</button>` +
+      `<span class="fd-chips">${chipsHtml(section)}</span>` +
+      `<span class="fd-origin" title="${escapeHtml(origem + aparelho)}">` +
+        `${escapeHtml(origem)}${escapeHtml(aparelho)}</span>` +
+      `<span class="fd-count${section.error ? " fd-err" : ""}">${escapeHtml(count)}</span>` +
+      `${pagina ? `<span class="fd-pagina">${pagina}</span>` : ""}` +
+      `<span class="fd-spacer"></span>` +
+      `<label class="fd-check" title="Marcar esta secao para exportar">` +
+        `<input type="checkbox" class="fd-export"${section.exportChecked ? " checked" : ""}> exportar</label>` +
+      `<button class="fd-page" data-dir="-1" ${!r || r.files || r.offset === 0 ? "disabled" : ""} title="Pagina anterior">&#8592;</button>` +
+      `<button class="fd-page" data-dir="1" ${!r || r.files || !r.hasMore ? "disabled" : ""} title="Proxima pagina">&#8594;</button>` +
+      `<button class="fd-close icon-btn" title="Remover esta busca">&times;</button>` +
+    `</header>` +
+    `<div class="fd-list"></div>`;
+
+  const list = box.querySelector(".fd-list");
+  if (r && r.lines.length) {
+    const withFile = !!r.files;
+    const rows = r.lines.map((text, i) => ({
+      n: r.numbers[i], c: r.columns[i], text,
+      file: withFile ? r.files[i] : null,
+      marked: !withFile && tab.exportMarks.has(r.numbers[i]),
+      active: section.activeLine === r.numbers[i],
+    }));
+    list.innerHTML = resultTableHtml(tab, rows, withFile, tab.wrapText);
+  } else if (r) {
+    list.innerHTML = '<div class="fd-empty">Nenhuma linha encontrada.</div>';
+  }
+
+  box.querySelector(".fd-toggle").addEventListener("click", () => {
+    section.collapsed = !section.collapsed;
+    refreshPanel(tab);
+  });
+  box.querySelector(".fd-close").addEventListener("click", () => {
+    if (section.id === SAVED_SECTION_ID) {
+      // Fechar a secao dos filtros salvos e o mesmo que desligar todos.
+      tab.activeFilterIds.clear();
+      syncSavedFilters(tab);
+      return;
+    }
+    tab.findSections = tab.findSections.filter((x) => x.id !== section.id);
+    refreshPanel(tab);
+  });
+  box.querySelector(".fd-export").addEventListener("change", (e) => {
+    section.exportChecked = e.target.checked;
+  });
+  box.querySelectorAll(".fd-page").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const delta = Number(btn.dataset.dir) * FIND_PAGE;
+      runSearch(tab, section.query, {
+        sectionId: section.id,
+        offset: Math.max(0, section.results.offset + delta),
+      });
+    });
+  });
+  // Duplo clique navega. O clique simples nao faz nada de proposito: assim da
+  // para selecionar trechos de uma ou varias linhas aqui sem que a janela do
+  // log fique pulando a cada toque.
+  wireColumnResize(box);
+  list.addEventListener("dblclick", (e) => {
+    const row = e.target.closest(".fd-row");
+    if (!row) return;
+    section.activeLine = Number(row.dataset.line);
+    openAtLine(tab, section.activeLine, row.dataset.file);
+  });
+  return box;
+}
+
+/** Secao fixa com o que foi marcado para exportar e com os bookmarks. */
+function buildMarkedSection(tab) {
+  const rows = markedRows(tab);
+  const box = document.createElement("section");
+  box.className = "fd-section fd-marked" + (tab.markedCollapsed ? " collapsed" : "");
+
+  box.innerHTML =
+    `<header class="fd-sec-head">` +
+      `<button class="fd-toggle" title="Colapsar/expandir">${tab.markedCollapsed ? "▸" : "▾"}</button>` +
+      `<span class="fd-chips"><span class="fd-term fd-term-plain">✓ marcadas para exportar</span>` +
+      `<span class="fd-term fd-term-plain">⚑ bookmarks</span></span>` +
+      `<span class="fd-count">${fmtNum(rows.length)} linha(s)</span>` +
+      `<span class="fd-spacer"></span>` +
+      `<label class="fd-check" title="Marcar esta secao para exportar">` +
+        `<input type="checkbox" class="fd-export"${tab.markedExport ? " checked" : ""}> exportar</label>` +
+      `<button class="fd-clear" title="Limpar as marcacoes">Limpar</button>` +
+    `</header>` +
+    `<div class="fd-list"></div>`;
+
+  const list = box.querySelector(".fd-list");
+  if (rows.length) {
+    const shaped = rows.map((row) => ({
+      n: row.n, c: row.c, text: row.text, file: null,
+      marked: row.marked,
+      active: tab.markedActiveLine === row.n,
+      body: (row.marked ? '<span class="fd-flag">&#10003;</span>' : "") +
+        (row.bookmarked ? '<span class="fd-flag">&#9873;</span>' : "") +
+        (row.text === null
+          ? '<span class="fd-out">(fora da pagina carregada — duplo clique para ir ate ela)</span>'
+          : decorateText(row.c ? (row.c.msg ?? row.text) : row.text, tab)),
+    }));
+    list.innerHTML = resultTableHtml(tab, shaped, false, tab.wrapText);
+  } else {
+    list.innerHTML = '<div class="fd-empty">Nenhuma linha marcada. Use o menu de ' +
+      'contexto do log: "Marcar para exportar" ou "Marcar/desmarcar (bookmark)".</div>';
+  }
+
+  box.querySelector(".fd-toggle").addEventListener("click", () => {
+    tab.markedCollapsed = !tab.markedCollapsed;
+    refreshPanel(tab);
+  });
+  box.querySelector(".fd-export").addEventListener("change", (e) => {
+    tab.markedExport = e.target.checked;
+  });
+  box.querySelector(".fd-clear").addEventListener("click", () => {
+    if (!rows.length) return;
+    if (!window.confirm("Limpar as linhas marcadas e os bookmarks desta aba?")) return;
+    tab.exportMarks.clear();
+    tab.bookmarks.clear();
+    refreshPanel(tab);
+  });
+  wireColumnResize(box);
+  list.addEventListener("dblclick", (e) => {
+    const row = e.target.closest(".fd-row");
+    if (!row) return;
+    tab.markedActiveLine = Number(row.dataset.line);
+    openAtLine(tab, tab.markedActiveLine, null);
+  });
+  return box;
+}
+
 function buildFindDock(tab) {
   if (!tab.findOpen) return null;
   const dock = document.createElement("div");
   dock.className = "find-dock";
 
-  const terms = tab.filterTerms || [];
-  const legend = terms.map((t) =>
-    `<span class="fd-term hl-${t.color}">${escapeHtml(t.pattern)}</span>`).join("");
-
-  const r = tab.findResults;
-  const head = tab.findLoading
-    ? "Buscando no arquivo inteiro..."
-    : tab.findError
-      ? tab.findError
-      : r
-        ? `${fmtNum(r.matched)} ${r.files ? "ocorrencia(s)" : "linha(s)"}` +
-          `${r.truncated ? "+" : ""} para "${escapeHtml(tab.findQuery)}"` +
-          (r.files ? ` em ${r.filesSearched} arquivo(s)` : "") +
-          (!r.files && r.matched > r.lines.length
-            ? ` | mostrando ${fmtNum(r.offset + 1)}-${fmtNum(r.offset + r.lines.length)}`
-            : "")
-        : "";
-
   dock.innerHTML =
     `<div class="fd-resize" title="Arraste para redimensionar"></div>` +
     `<div class="fd-head">` +
-      `<strong class="${tab.findError ? "fd-err" : ""}">${head}</strong>` +
-      `<span class="fd-legend">${legend}</span>` +
+      `<strong>Resultados</strong>` +
+      `<span class="fd-hint">duplo clique numa linha vai ate ela no log</span>` +
       `<span class="fd-spacer"></span>` +
-      `<button data-fd="prev" ${!r || r.files || r.offset === 0 ? "disabled" : ""} title="Resultados anteriores">&#8592;</button>` +
-      `<button data-fd="next" ${!r || r.files || !r.hasMore ? "disabled" : ""} title="Proximos resultados">&#8594;</button>` +
-      `<button data-fd="export" ${!r || r.files ? "disabled" : ""} title="Exportar todos os resultados">Exportar</button>` +
+      `<button data-fd="export" title="Exportar as secoes marcadas com 'exportar'">Exportar marcadas</button>` +
+      `<button data-fd="clear" title="Remover todas as buscas">Limpar buscas</button>` +
       `<button data-fd="close" class="icon-btn" title="Fechar a janela de resultados">&times;</button>` +
     `</div>` +
-    `<div class="fd-list"></div>`;
+    `<div class="fd-sections"></div>`;
 
-  const list = dock.querySelector(".fd-list");
-  if (r && r.lines.length) {
-    list.innerHTML = r.lines.map((text, i) => {
-      const c = r.columns[i];
-      const badge = c && c.level ? `<span class="badge badge-${c.level}">${c.level}</span>` : "";
-      const tag = c && c.tag ? `<span class="fd-tag">${escapeHtml(c.tag)}</span>` : "";
-      // Numa busca por varios arquivos, o nome do arquivo vem antes da linha.
-      const file = r.files ? r.files[i] : null;
-      const fileCell = file
-        ? `<span class="fd-file" title="${escapeHtml(file)}">${escapeHtml(file.split("/").pop())}</span>`
-        : "";
-      return `<div class="fd-row" data-line="${r.numbers[i]}"` +
-        `${file ? ` data-file="${escapeHtml(file)}"` : ""}>` +
-        `${fileCell}<span class="fd-n">${fmtNum(r.numbers[i])}</span>` +
-        `<span class="fd-txt">${badge}${tag}${decorateText(text, tab)}</span></div>`;
-    }).join("");
-  } else if (r) {
-    list.innerHTML = '<div class="fd-empty">Nenhuma linha encontrada no arquivo inteiro.</div>';
-  }
+  const holder = dock.querySelector(".fd-sections");
+  holder.appendChild(buildMarkedSection(tab));
+  for (const section of tab.findSections) holder.appendChild(buildSection(tab, section));
 
-  list.addEventListener("click", (e) => {
-    const row = e.target.closest(".fd-row");
-    if (!row) return;
-    list.querySelectorAll(".fd-row.on").forEach((n) => n.classList.remove("on"));
-    row.classList.add("on");
-    // Leva o log ate a linha correspondente; se o resultado for de outro
-    // arquivo, abre esse arquivo na linha certa.
-    const line = Number(row.dataset.line);
-    if (row.dataset.file && row.dataset.file !== tab.path) {
-      // A lista de resultados viaja junto: quem procura na pasta inteira
-      // precisa continuar clicando nos proximos sem refazer a busca.
-      const carry = {
-        findOpen: true, findResults: tab.findResults, findQuery: tab.findQuery,
-        findScope: tab.findScope, findScopeUsed: tab.findScopeUsed,
-        findHeight: tab.findHeight, liveFilter: tab.liveFilter,
-      };
-      openFile(row.dataset.file, line);
-      const opened = state.tabs.find((t) => t.path === row.dataset.file);
-      if (opened) {
-        Object.assign(opened, carry);
-        opened.filterTerms = filterTerms(opened);
-      }
-    } else {
-      jumpToLine(tab, line);
-    }
-  });
-
-  const fd = (name) => dock.querySelector(`[data-fd="${name}"]`);
-  fd("close").addEventListener("click", () => {
+  dock.querySelector('[data-fd="close"]').addEventListener("click", () => {
     tab.findOpen = false;
     refreshPanel(tab);
   });
-  fd("prev").addEventListener("click", () =>
-    searchWholeFile(tab, Math.max(0, tab.findResults.offset - FIND_PAGE)));
-  fd("next").addEventListener("click", () =>
-    searchWholeFile(tab, tab.findResults.offset + FIND_PAGE));
-  fd("export").addEventListener("click", () => exportFindResults(tab));
+  dock.querySelector('[data-fd="clear"]').addEventListener("click", () => {
+    tab.findSections = [];
+    tab.activeFilterIds.clear();
+    renderFilterList();
+    refreshPanel(tab);
+  });
+  dock.querySelector('[data-fd="export"]').addEventListener("click", () => exportChecked(tab));
 
   dock.querySelector(".fd-resize").addEventListener("mousedown", (e) => {
     e.preventDefault();
@@ -1331,27 +1875,73 @@ function buildFindDock(tab) {
   return dock;
 }
 
-/** Baixa todas as linhas encontradas, nao so a pagina exibida no dock. */
-async function exportFindResults(tab) {
-  const { params } = fileSearchParams(tab);
-  params.set("offset", 0);
-  params.set("limit", 20000);
-  setStatus("Montando o arquivo de resultados...");
-  try {
-    const res = await fetch(`/api/filtered?${params}`);
-    const data = await res.json();
-    if (!res.ok) {
-      setStatus(data.error || "Erro exportando.", true);
-      return;
+/** Abre a linha com folga em volta: centralizada, com ~1.000 linhas de cada
+ *  lado, para dar contexto sem precisar navegar. */
+const JUMP_CONTEXT = 1000;
+
+function openAtLine(tab, line, file) {
+  if (file && file !== tab.path) {
+    // A lista de resultados viaja junto para continuar clicando nos proximos.
+    const carry = {
+      findOpen: true, findSections: tab.findSections, findScope: tab.findScope,
+      findHeight: tab.findHeight, liveFilter: tab.liveFilter,
+      colorCursor: tab.colorCursor,
+    };
+    openFile(file, line);
+    const opened = state.tabs.find((t) => t.path === file);
+    if (opened) {
+      Object.assign(opened, carry);
+      opened.filterTerms = activeTerms(opened);
     }
-    const body = data.lines.map((l, i) => `${data.line_numbers[i]}: ${l}`).join("\n");
-    const base = tab.path.split("/").pop().replace(/\.[^.]+$/, "");
-    downloadText(`${base}-busca.txt`, body + "\n");
-    setStatus(`${data.lines.length} linha(s) exportada(s)` +
-      (data.matched > data.lines.length ? ` de ${fmtNum(data.matched)} encontradas` : "") + ".");
-  } catch (err) {
-    setStatus("Falha na requisicao: " + err, true);
+    return;
   }
+  jumpToLine(tab, line);
+}
+
+/** Exporta as secoes marcadas com "exportar". */
+async function exportChecked(tab) {
+  const parts = [];
+  if (tab.markedExport) {
+    const rows = markedRows(tab);
+    if (rows.length) {
+      parts.push(`===== linhas marcadas (${rows.length}) =====`);
+      for (const row of rows) {
+        parts.push(`${row.n}: ${row.text ?? "(fora da pagina carregada)"}`);
+      }
+    }
+  }
+  for (const section of tab.findSections) {
+    if (!section.exportChecked || !section.results) continue;
+    // Exporta tudo o que a busca encontrou, nao so a pagina exibida.
+    let lines = section.results.lines;
+    let numbers = section.results.numbers;
+    if (section.scope === "current" && section.results.matched > lines.length) {
+      let params;
+      if (section.groups) {
+        params = new URLSearchParams({ root: state.root, file: tab.path });
+        params.set("groups", JSON.stringify(section.groups));
+      } else {
+        ({ params } = fileSearchParams(tab, section.query));
+      }
+      params.set("offset", 0);
+      params.set("limit", 20000);
+      try {
+        const res = await fetch(`/api/filtered?${params}`);
+        const data = await res.json();
+        if (res.ok) { lines = data.lines; numbers = data.line_numbers; }
+      } catch { /* mantem a pagina carregada */ }
+    }
+    parts.push(`===== ${section.query} (${lines.length} de ${fmtNum(section.results.matched)}) =====`);
+    lines.forEach((l, i) => parts.push(`${numbers[i]}: ${l}`));
+  }
+
+  if (!parts.length) {
+    setStatus('Marque "exportar" em ao menos uma secao.', true);
+    return;
+  }
+  const base = tab.path.split("/").pop().replace(/\.[^.]+$/, "");
+  downloadText(`${base}-selecao.txt`, parts.join("\n") + "\n");
+  setStatus("Exportado.");
 }
 
 function wirePanel(tab, panel, toolbar, wrap, shown, paneIndex) {
@@ -1367,23 +1957,17 @@ function wirePanel(tab, panel, toolbar, wrap, shown, paneIndex) {
   }
 
   const liveInput = toolbar.querySelector(".live-filter");
-  let debounce;
-  liveInput.addEventListener("input", () => {
-    clearTimeout(debounce);
-    debounce = setTimeout(() => {
-      tab.liveFilter = liveInput.value;
-      recomputeSearch(tab);
-      refreshPanel(tab);
-    }, 250);
-  });
+  // Digitar apenas guarda o texto. Nada na tela muda ate a busca ser
+  // disparada: o log nao se mexe, e as cores so aparecem depois que a consulta
+  // vira uma secao de resultados.
+  liveInput.addEventListener("input", () => { tab.liveFilter = liveInput.value; });
   // Enter procura no arquivo inteiro: e o gesto natural, e sem ele a busca
   // ficaria presa na pagina carregada.
   liveInput.addEventListener("keydown", (e) => {
     if (e.key !== "Enter") return;
     e.preventDefault();
-    clearTimeout(debounce);
     tab.liveFilter = liveInput.value;
-    searchWholeFile(tab, 0);
+    runSearch(tab);
   });
 
   toolbar.querySelectorAll(".level-toggle").forEach((btn) => {
@@ -1391,18 +1975,20 @@ function wirePanel(tab, panel, toolbar, wrap, shown, paneIndex) {
       const lvl = btn.dataset.level;
       if (tab.levels.has(lvl)) tab.levels.delete(lvl);
       else tab.levels.add(lvl);
-      recomputeSearch(tab);
-      refreshPanel(tab);
+      refreshPanel(tab);   // marca as linhas do nivel; nao esconde nada
     });
   });
 
   const act = (name) => toolbar.querySelector(`[data-act="${name}"]`);
   // No modo "arquivo todo" a paginacao percorre o resultado filtrado.
   const goTo = (offset) => loadFileContent(tab, { offset });
+  // Avanca pelo que esta carregado: depois de um salto a janela e maior que a
+  // pagina escolhida, e paginar pelo valor do seletor repetiria linhas.
+  const step = () => Math.max(1, tab.lines.length || tab.limit);
   act("start").addEventListener("click", () => goTo(0));
   act("tail").addEventListener("click", () => loadFileContent(tab, { tail: true }));
-  act("prev").addEventListener("click", () => goTo(Math.max(0, tab.offset - tab.limit)));
-  act("next").addEventListener("click", () => goTo(tab.offset + tab.limit));
+  act("prev").addEventListener("click", () => goTo(Math.max(0, tab.offset - step())));
+  act("next").addEventListener("click", () => goTo(tab.offset + step()));
   act("pagesize").addEventListener("change", (e) => {
     tab.limit = Number(e.target.value);
     goTo(tab.offset);
@@ -1410,10 +1996,10 @@ function wirePanel(tab, panel, toolbar, wrap, shown, paneIndex) {
   act("find").addEventListener("click", () => promptSearch(tab));
   act("prevhit").addEventListener("click", () => stepSearch(tab, -1));
   act("nexthit").addEventListener("click", () => stepSearch(tab, 1));
-  act("filesearch").addEventListener("click", () => searchWholeFile(tab, 0));
+  act("filesearch").addEventListener("click", () => runSearch(tab));
   act("scope").addEventListener("change", (e) => {
     tab.findScope = e.target.value;
-    if (tab.liveFilter.trim()) searchWholeFile(tab, 0);
+    if (tab.liveFilter.trim()) runSearch(tab);
   });
   act("timeline").addEventListener("click", () => {
     tab.timelineOpen = !tab.timelineOpen;
@@ -1426,6 +2012,14 @@ function wirePanel(tab, panel, toolbar, wrap, shown, paneIndex) {
     if (!n || n < 1) return;
     jumpToLine(tab, Math.min(n, tab.totalLines || n));
   });
+  act("follow").addEventListener("change", (e) => {
+    tab.follow = e.target.checked;
+    if (tab.follow) loadFileContent(tab, { tail: true });
+  });
+  act("autoscroll").addEventListener("change", (e) => {
+    tab.autoScroll = e.target.checked;
+    if (tab.autoScroll) scrollToEnd(tab);
+  });
   act("wrap").addEventListener("change", (e) => {
     tab.wrapText = e.target.checked;
     refreshPanel(tab);
@@ -1433,10 +2027,12 @@ function wirePanel(tab, panel, toolbar, wrap, shown, paneIndex) {
   act("export").addEventListener("click", () => exportLines(tab, shown));
   act("reset").addEventListener("click", () => resetFilters(tab));
 
+  wireColumnResize(panel);
+
   const tbody = wrap.querySelector("tbody");
   if (!tbody) return;
 
-  tbody.addEventListener("click", (e) => {
+  clickNotDrag(tbody, (e) => {
     // Abrir/fechar um bloco de stack trace nao mexe na selecao.
     const toggle = e.target.closest(".trace-toggle");
     if (toggle) {
@@ -1490,6 +2086,41 @@ function wirePanel(tab, panel, toolbar, wrap, shown, paneIndex) {
   });
 }
 
+/** Arrastar a borda do cabecalho muda a largura da coluna. A largura vive numa
+ *  variavel CSS, entao o ajuste vale ao mesmo tempo para a tabela de log e para
+ *  as de resultado, sem refazer o HTML durante o arrasto. */
+function wireColumnResize(root) {
+  root.querySelectorAll(".col-resize").forEach((handle) => {
+    handle.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const key = handle.dataset.col;
+      const startX = e.clientX;
+      const startW = state.colWidths[key] ?? DEFAULT_COL_WIDTHS[key] ?? 80;
+      document.body.classList.add("resizing-col");
+      const onMove = (ev) => {
+        state.colWidths[key] = Math.max(16, Math.round(startW + ev.clientX - startX));
+        applyColWidths();
+      };
+      const onUp = () => {
+        document.body.classList.remove("resizing-col");
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        persist(COL_WIDTHS_KEY, state.colWidths);
+      };
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    });
+    // Duplo clique na borda devolve a largura padrao da coluna.
+    handle.addEventListener("dblclick", (e) => {
+      e.stopPropagation();
+      state.colWidths[handle.dataset.col] = DEFAULT_COL_WIDTHS[handle.dataset.col];
+      applyColWidths();
+      persist(COL_WIDTHS_KEY, state.colWidths);
+    });
+  });
+}
+
 /** Redesenha os paineis que mostram esta aba, preservando a rolagem. */
 function refreshPanel(tab) {
   const targets = [...panelsEl.querySelectorAll(`[data-panel-id="${tab.id}"]`)];
@@ -1536,13 +2167,15 @@ function resetFilters(tab) {
   tab.highlightTags.clear();
   tab.highlightPids.clear();
   tab.liveFilter = "";
-  tab.activeFilterId = null;
+  tab.activeFilterIds.clear();
   tab.searchTerm = "";
+  tab.timeRange = null;
   recomputeSearch(tab);
   state.selectedFilterId = null;
   renderFilterList();
   refreshPanel(tab);
-  setStatus("Filtros e destaques limpos.");
+  // As buscas e as marcacoes ficam: sao trabalho do usuario, nao filtro.
+  setStatus("Filtros, marcas de nivel e destaques limpos.");
 }
 
 function exportLines(tab, shown) {
@@ -1614,7 +2247,9 @@ function showContextMenu(x, y, tab, picked) {
       disabled: !picked, act: () => addHighlight(picked, false) },
     { label: "Copiar linha(s)", act: () => copySelection(tab) },
     { label: "Exportar selecao...", act: () => exportLines(tab, []) },
+    { label: "Marcar para exportar", act: () => toggleExportMarks(tab) },
     { label: "Marcar/desmarcar (bookmark)", act: () => toggleBookmarks(tab) },
+    { label: "Ver linhas marcadas", act: () => { tab.findOpen = true; tab.markedCollapsed = false; } },
     { sep: true },
     { label: "Mostrar so a(s) TAG(s)" + tagLabel, disabled: !tags.size,
       act: () => { tags.forEach((t) => tab.showTags.add(t)); } },
@@ -1677,6 +2312,14 @@ window.addEventListener("blur", hideContextMenu);
 function copySelection(tab) {
   const text = tab.lines.filter((l) => tab.selected.has(l.n)).map((l) => l.text).join("\n");
   if (text) copyToClipboard(text, `${tab.selected.size} linha(s) copiada(s).`);
+}
+
+function toggleExportMarks(tab) {
+  for (const n of tab.selected) {
+    if (tab.exportMarks.has(n)) tab.exportMarks.delete(n);
+    else tab.exportMarks.add(n);
+  }
+  tab.findOpen = true;   // a janela abre para conferir antes de exportar
 }
 
 function toggleBookmarks(tab) {
@@ -1793,10 +2436,85 @@ async function scanDevice() {
   }
 }
 
+/** Tudo que o app conseguiu associar a um codigo do log: PID e UID viram nome
+ *  de processo, TAG vira o servico do sistema. Sao as mesmas associacoes que
+ *  aparecem na dica de cada celula, reunidas num lugar so para consulta. */
+function associationsHtml(tab, q) {
+  if (!tab) return "";
+  const parts = [];
+  const hit = (a, b) => !q || String(a).toLowerCase().includes(q) ||
+    String(b).toLowerCase().includes(q);
+
+  const pids = Object.entries(tab.procMap || {})
+    .filter(([pid, name]) => hit(pid, name))
+    .sort((a, b) => Number(a[0]) - Number(b[0]));
+  if (pids.length) {
+    parts.push(
+      `<details class="dev-cat" ${q ? "open" : ""}>` +
+      `<summary>\u{1F5C2} PID &rarr; processo<span class="count">${pids.length}</span></summary>` +
+      pids.map(([pid, name]) => {
+        const uid = (tab.procUids || {})[pid];
+        const dup = tab.procAmbiguous && tab.procAmbiguous.has(pid);
+        return `<div class="dev-item assoc" data-pid="${escapeHtml(pid)}" ` +
+          `title="Clique para buscar as linhas deste PID${dup ? " (PID reutilizado na captura)" : ""}">` +
+          `<span class="k">PID ${escapeHtml(pid)}${uid ? " &middot; uid " + escapeHtml(uid) : ""}` +
+          `${dup ? ' <em class="assoc-warn">reutilizado</em>' : ""}</span>` +
+          `<span class="v">${escapeHtml(name)}</span></div>`;
+      }).join("") + `</details>`);
+  }
+
+  // TAGs que o glossario reconhece como servico do sistema.
+  if (glossaryData) {
+    const tags = Object.entries(glossaryData.tag_index)
+      .map(([tag, sigla]) => [tag, sigla, glossaryEntry(sigla)])
+      .filter(([tag, sigla, e]) => e && hit(tag, `${sigla} ${e.nome}`));
+    if (tags.length) {
+      parts.push(
+        `<details class="dev-cat" ${q ? "open" : ""}>` +
+        `<summary>\u{1F3F7} TAG &rarr; servico<span class="count">${tags.length}</span></summary>` +
+        tags.map(([tag, sigla, e]) =>
+          `<div class="dev-item assoc" data-tag="${escapeHtml(tag)}" ` +
+          `title="${escapeHtml(e.desc)}">` +
+          `<span class="k">${escapeHtml(tag)}</span>` +
+          `<span class="v">${escapeHtml(sigla)} &middot; ${escapeHtml(e.nome)}</span></div>`).join("") +
+        `</details>`);
+    }
+  }
+  return parts.join("");
+}
+
+/** Clicar numa associacao dispara a busca correspondente. */
+function wireAssociations(tab) {
+  deviceInfoEl.querySelectorAll(".dev-item.assoc").forEach((node) => {
+    node.addEventListener("click", () => {
+      if (!tab) return;
+      const query = node.dataset.pid ? `pid:${node.dataset.pid}` : `tag:${node.dataset.tag}`;
+      tab.liveFilter = query;
+      runSearch(tab, query);
+    });
+  });
+}
+
 function renderDeviceInfo() {
-  if (!deviceReport) return;
+  const tab = activeTab();
   const q = el("#deviceSearch").value.trim().toLowerCase();
   const parts = [];
+  const assoc = associationsHtml(tab, q);
+  if (assoc) parts.push(assoc);
+
+  if (!deviceReport) {
+    // As associacoes vem do mapa de processos, que carrega sozinho ao abrir o
+    // arquivo; nao dependem da analise completa do aparelho.
+    deviceInfoEl.innerHTML = parts.length
+      ? parts.join("") +
+        '<p class="side-hint">Clique em <strong>Analisar</strong> para extrair ' +
+        'modelo, build, kernel, CPU, memoria, bateria e o resto.</p>'
+      : '<p class="side-hint">Abra um arquivo de log e clique em <strong>Analisar</strong> ' +
+        'para extrair modelo, build, kernel, CPU, memoria, bateria, telefonia e ' +
+        'demais dados do aparelho.</p>';
+    wireAssociations(tab);
+    return;
+  }
 
   for (const cat of deviceReport.categories) {
     const items = q
@@ -1848,6 +2566,8 @@ function renderDeviceInfo() {
     ? parts.join("")
     : '<p class="dev-empty">Nada encontrado para esse filtro.</p>';
 
+  wireAssociations(activeTab());
+
   // Clicar numa TAG frequente aplica o filtro na aba ativa.
   deviceInfoEl.querySelectorAll(".dev-item[data-tag]").forEach((node) => {
     node.style.cursor = "pointer";
@@ -1860,6 +2580,232 @@ function renderDeviceInfo() {
       setStatus(`Filtrando por tag:${node.dataset.tag}`);
     });
   });
+}
+
+// ---------------------------------------------------------------------------
+// Aparelhos ligados na USB (adb)
+// ---------------------------------------------------------------------------
+
+const usbListEl = el("#usbList");
+let usbLabels = {};
+
+/** Marca no topo de qual aparelho e a pasta aberta. Sem isso, com dois
+ *  aparelhos capturados, nada na tela diria de quem sao as linhas na tela. */
+function setRootDevice(identity) {
+  state.rootDevice = identity || null;
+  const badge = el("#rootDevice");
+  if (!identity) {
+    badge.hidden = true;
+    return;
+  }
+  const modelo = identity.modelo?.value || "aparelho";
+  const serial = identity.serial?.value || "";
+  badge.hidden = false;
+  badge.textContent = `\u{1F4F1} ${modelo}${serial ? " · " + serial : ""}`;
+  badge.title = Object.entries(identity)
+    .filter(([, v]) => v && v.value)
+    .map(([k, v]) => `${usbLabels[k] || k}: ${v.value}  (${v.prop})`)
+    .join("\n");
+}
+
+el("#usbScanBtn").addEventListener("click", scanUsb);
+
+async function scanUsb() {
+  const btn = el("#usbScanBtn");
+  btn.disabled = true;
+  usbListEl.innerHTML = '<p class="side-hint">Procurando...</p>';
+  try {
+    const res = await fetch("/api/usb_devices");
+    const data = await res.json();
+    if (!res.ok) {
+      usbListEl.innerHTML = `<p class="side-hint usb-err">${escapeHtml(data.error)}</p>`;
+      return;
+    }
+    usbLabels = data.labels || {};
+    renderUsb(data);
+  } catch (err) {
+    usbListEl.innerHTML = `<p class="side-hint usb-err">Falha na requisicao: ${escapeHtml(err)}</p>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderUsb(data) {
+  if (!data.devices.length) {
+    usbListEl.innerHTML = '<p class="side-hint">Nenhum aparelho na USB. Ligue o cabo e ' +
+      'habilite a depuracao USB no aparelho.</p>';
+    return;
+  }
+  usbListEl.innerHTML = data.devices.map((dev, i) => {
+    const id = dev.identity;
+    if (!id) {
+      return `<div class="usb-dev usb-off">` +
+        `<div class="usb-title">${escapeHtml(dev.model_hint || dev.serial)}</div>` +
+        `<div class="usb-err">${escapeHtml(dev.error || "sem resposta")}</div></div>`;
+    }
+    const rows = Object.entries(id)
+      .filter(([, v]) => v && v.value)
+      .map(([k, v]) =>
+        `<div class="usb-row" title="${escapeHtml(v.prop)}">` +
+        `<span class="k">${escapeHtml(usbLabels[k] || k)}</span>` +
+        `<span class="v">${escapeHtml(v.value)}</span></div>`).join("");
+    return `<div class="usb-dev" data-i="${i}">` +
+      `<div class="usb-title">${escapeHtml(id.modelo?.value || dev.serial)}</div>` +
+      rows +
+      `<button class="usb-capture" data-serial="${escapeHtml(dev.serial)}">Capturar logs</button>` +
+      `<div class="usb-live" data-serial="${escapeHtml(dev.serial)}"></div>` +
+      `</div>`;
+  }).join("") +
+    `<p class="side-hint">Cada aparelho grava numa pasta propria, nomeada por ` +
+    `modelo e serial, e a captura abre essa pasta — dois aparelhos nunca se misturam.</p>`;
+
+  usbListEl.querySelectorAll(".usb-capture").forEach((btn) => {
+    btn.addEventListener("click", () => captureUsb(btn, btn.dataset.serial));
+  });
+  renderLive();
+}
+
+// ---------------------------------------------------------------------------
+// Coleta ao vivo do logcat
+// ---------------------------------------------------------------------------
+// O adb grava num arquivo que cresce e o app abre esse arquivo como qualquer
+// outro; a analise ao vivo e a mesma de um log parado.
+
+let liveSessions = [];
+
+async function refreshLive() {
+  try {
+    const res = await fetch("/api/live_status");
+    const data = await res.json();
+    liveSessions = data.sessions || [];
+  } catch { liveSessions = []; }
+  renderLive();
+}
+
+function liveOf(serial) {
+  return liveSessions.find((s) => s.serial === serial) || null;
+}
+
+function renderLive() {
+  usbListEl.querySelectorAll(".usb-live").forEach((box) => {
+    const serial = box.dataset.serial;
+    const live = liveOf(serial);
+    const rodando = live && live.state !== "encerrada";
+
+    box.innerHTML = rodando
+      ? `<div class="live-state live-${live.state}">` +
+          `${live.state === "pausada" ? "\u23f8 pausada" : "\u25cf coletando"}` +
+          ` \u00b7 ${fmtSize(live.size)}` +
+          `${live.filter ? " \u00b7 filtro " + escapeHtml(live.filter) : ""}</div>` +
+        `<div class="live-btns">` +
+          `<button data-live="${live.state === "pausada" ? "resume" : "pause"}">` +
+            `${live.state === "pausada" ? "Retomar" : "Pausar"}</button>` +
+          `<button data-live="restart">Reiniciar</button>` +
+          `<button data-live="stop">Parar</button>` +
+          `<button data-live="open">Abrir</button>` +
+        `</div>`
+      : `<div class="live-btns">` +
+          `<input class="live-filter-spec" placeholder="filtro do logcat, ex: *:E" ` +
+            `title="Formato do logcat: TAG:nivel. Ex: ActivityManager:I *:S">` +
+          `<button data-live="start" class="primary">Coletar ao vivo</button>` +
+        `</div>`;
+
+    box.querySelectorAll("[data-live]").forEach((btn) => {
+      btn.addEventListener("click", () => liveAction(serial, btn.dataset.live, box));
+    });
+  });
+}
+
+async function liveAction(serial, action, box) {
+  if (action === "open") {
+    const live = liveOf(serial);
+    if (live) await abrirAoVivo(live);
+    return;
+  }
+  const params = new URLSearchParams({ action, serial });
+  const spec = box.querySelector(".live-filter-spec");
+  if (spec && spec.value.trim()) params.set("filter", spec.value.trim());
+
+  try {
+    const res = await fetch(`/api/live?${params}`, { method: "POST" });
+    const data = await res.json();
+    if (!res.ok) {
+      setStatus(data.error || "Erro na coleta.", true);
+      return;
+    }
+    await refreshLive();
+    if (action === "start" || action === "restart") {
+      setStatus(`Coletando o logcat de ${serial}...`);
+      await abrirAoVivo(data);
+    } else {
+      setStatus(`Coleta ${action === "pause" ? "pausada" : action === "resume" ? "retomada" : "encerrada"}.`);
+    }
+  } catch (err) {
+    setStatus("Falha na requisicao: " + err, true);
+  }
+}
+
+/** Abre o arquivo que esta sendo gravado e liga o modo "seguir". */
+async function abrirAoVivo(live) {
+  el("#rootInput").value = live.dir;
+  state.rootDeviceBase = live.dir;
+  if (live.identity) setRootDevice(live.identity);
+  await loadRoot();
+  // Sem trocar de aba: os controles de pausar e parar ficam nesta, e escondê-los
+  // logo depois de iniciar a coleta deixaria o usuario sem como interromper.
+  openFile(live.file.split("/").pop());
+  const tab = activeTab();
+  if (tab) {
+    // Numa coleta ao vivo o que interessa e a linha que acabou de chegar.
+    tab.follow = true;
+    tab.autoScroll = true;
+    await loadFileContent(tab, { tail: true });
+  }
+}
+
+// Enquanto houver coleta rodando, o estado dos botoes e o tamanho do arquivo
+// se atualizam sozinhos.
+setInterval(() => {
+  if (liveSessions.some((s) => s.state !== "encerrada")) refreshLive();
+}, 3000);
+
+// O modo "seguir" recarrega o fim do arquivo que cresce.
+setInterval(() => {
+  for (const tab of state.tabs) {
+    if (!tab.follow || tab.binary) continue;
+    loadFileContent(tab, { tail: true });
+  }
+}, 3000);
+
+async function captureUsb(btn, serial) {
+  const withBugreport = el("#usbBugreport").checked;
+  btn.disabled = true;
+  btn.textContent = withBugreport ? "Capturando (bugreport demora)..." : "Capturando...";
+  setStatus(`Capturando logs de ${serial}...`);
+  try {
+    const params = new URLSearchParams({ serial });
+    if (withBugreport) params.set("bugreport", "true");
+    const res = await fetch(`/api/usb_capture?${params}`, { method: "POST" });
+    const data = await res.json();
+    if (!res.ok) {
+      setStatus(data.error || "Erro na captura.", true);
+      return;
+    }
+    // Abre a pasta do aparelho: a partir daqui a analise e a mesma de sempre.
+    el("#rootInput").value = data.path;
+    state.rootDeviceBase = data.path;
+    setRootDevice(data.identity);
+    await loadRoot();
+    // Leva para a arvore: e nela que os arquivos capturados aparecem.
+    document.querySelector('.side-tab[data-side="files"]').click();
+    setStatus(`${data.files.length} arquivo(s) capturados de ` +
+      `${data.identity.modelo?.value || serial} em ${data.path}`);
+  } catch (err) {
+    setStatus("Falha na requisicao: " + err, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Capturar logs";
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1885,37 +2831,203 @@ function renderFilterList() {
     filterListEl.appendChild(li);
     return;
   }
+  // Cada filtro e um botao de liga/desliga: varios podem ficar ativos ao mesmo
+  // tempo, e juntos formam uma unica secao de resultados.
+  const tab = activeTab();
   for (const f of state.savedFilters) {
+    const on = !!(tab && tab.activeFilterIds.has(f.id));
     const li = document.createElement("li");
-    li.className = state.selectedFilterId === f.id ? "selected" : "";
-    const bits = [];
-    if (f.levels && f.levels.length) bits.push(f.levels.join(""));
-    if (f.tag) bits.push("tag:" + f.tag);
-    if (f.text) bits.push("txt:" + f.text);
-    if (f.pid) bits.push("pid:" + f.pid);
-    if (f.tid) bits.push("tid:" + f.tid);
+    li.className = (on ? "on " : "") + (state.selectedFilterId === f.id ? "selected" : "");
+    // Um no por linha no resumo: espremer tudo numa linha so obrigava a cortar
+    // o nome, que e justamente o que identifica o filtro.
+    const nodes = filterNodes(f);
+    const resumo = nodes.map((n) => {
+      const campos = [
+        n.tag ? `tag:${n.tag}` : "",
+        n.pid ? `pid:${n.pid}` : "",
+        n.tid ? `tid:${n.tid}` : "",
+        n.levels && n.levels.length ? n.levels.join("") : "",
+      ].filter(Boolean).join(" ");
+      const partes = [campos, n.text].filter(Boolean);
+      return partes.join(" \u00b7 ") || "(vazio)";
+    });
     li.innerHTML =
-      `<span class="filter-name">${f.negate ? '<span class="neg">!</span> ' : ""}${escapeHtml(f.name)}</span>` +
-      `<span class="filter-meta">${escapeHtml(bits.join(" ").slice(0, 40))}</span>`;
-    li.addEventListener("click", () => applySavedFilter(f.id));
+      `<span class="filter-onoff">${on ? "&#9679;" : "&#9675;"}</span>` +
+      `<div class="filter-body">` +
+        `<div class="filter-name">${escapeHtml(f.name)}</div>` +
+        resumo.map((linha, i) =>
+          `<div class="filter-meta">${i ? '<em class="filter-ou">ou</em> ' : ""}` +
+          `${escapeHtml(linha)}</div>`).join("") +
+      `</div>`;
+    li.title = (on ? "Ativo — clique para desligar" : "Clique para ativar") +
+      "\nDuplo clique edita o filtro";
+    li.addEventListener("click", () => {
+      state.selectedFilterId = f.id;   // qual o Editar/Excluir vao pegar
+      toggleSavedFilter(f.id);
+    });
     li.addEventListener("dblclick", () => openFilterDialog(f.id));
     filterListEl.appendChild(li);
   }
 }
 
-function applySavedFilter(id) {
+/** Valor de campo casa exatamente, nao por pedaco: quem escreve
+ *  tag:TelephonyDataSource quer aquela TAG, nao qualquer uma que a contenha.
+ *  Continua aceitando "a|b" para varios valores, e um padrao com sintaxe de
+ *  regex e respeitado como o autor escreveu. */
+function exactPattern(value) {
+  if (/[\\^$.*+?()[\]{}]/.test(value)) return value;
+  const parts = value.split("|").map((v) => v.trim()).filter(Boolean);
+  if (!parts.length) return value;
+  return `^(?:${parts.join("|")})$`;
+}
+
+/** Converte os nos do filtro no payload que /api/filtered espera, resolvendo
+ *  nomes de processo em PIDs.
+ *
+ *  Dentro de um no tudo e E: os campos preenchidos precisam casar todos. As
+ *  palavras-chave procuram no texto da mensagem quando o no tambem define
+ *  TAG/PID/TID/nivel — senao "TAG Telecom com a palavra Telecom" casaria pela
+ *  propria coluna TAG. Num no so de palavras-chave elas valem para a linha
+ *  inteira, que e o unico jeito de alcancar as linhas que nem sao logcat.
+ *  Entre nos e OU: cada no filtra por conta e os resultados se somam. */
+function filterGroups(tab, f) {
+  const groups = [];
+  let unresolved = null;
+  for (const node of filterNodes(f)) {
+    const g = {};
+    if (node.tag) g.tag = exactPattern(node.tag);
+    if (node.tid) g.tid = exactPattern(node.tid);
+    if (node.levels && node.levels.length) g.levels = node.levels.join(",");
+    if (node.pid) {
+      const r = resolvePid(tab, node.pid);
+      if (!r.pattern) { unresolved = node.pid; continue; }
+      g.pid = r.pattern;
+    }
+    if (node.text) {
+      const words = splitAndOr(node.text).groups;
+      if (Object.keys(g).length) g.text = words;   // com campo definido: so a mensagem
+      else g.raw = words;                          // no de palavras: a linha toda
+    }
+    if (Object.keys(g).length) groups.push(g);
+  }
+  return { groups, unresolved };
+}
+
+// Todos os filtros salvos ativos vivem numa secao so, com este id fixo: ligar
+// ou desligar um filtro atualiza essa mesma secao em vez de empilhar outras.
+const SAVED_SECTION_ID = "filtros-salvos";
+
+/** Liga/desliga um filtro salvo na aba atual. Varios podem ficar ativos ao
+ *  mesmo tempo, e o conjunto vira uma unica secao de resultados. */
+function toggleSavedFilter(id) {
   const tab = activeTab();
-  // Clicar de novo no filtro ja ativo desliga-o.
-  const turningOff = state.selectedFilterId === id;
-  state.selectedFilterId = turningOff ? null : id;
-  if (tab) {
-    tab.activeFilterId = state.selectedFilterId;
-    recomputeSearch(tab);
+  if (!tab) {
+    setStatus("Abra um arquivo antes de aplicar o filtro.", true);
+    return;
+  }
+  if (tab.activeFilterIds.has(id)) tab.activeFilterIds.delete(id);
+  else tab.activeFilterIds.add(id);
+  syncSavedFilters(tab);
+}
+
+/** Recalcula a secao dos filtros salvos a partir dos que estao ativos. */
+function syncSavedFilters(tab) {
+  const idx = tab.findSections.findIndex((x) => x.id === SAVED_SECTION_ID);
+  if (idx >= 0) tab.findSections.splice(idx, 1);
+
+  const filters = [...tab.activeFilterIds]
+    .map((id) => state.savedFilters.find((f) => f.id === id))
+    .filter(Boolean);
+
+  // Sem nenhum filtro ativo a secao simplesmente deixa de existir.
+  if (!filters.length) {
+    renderFilterList();
     refreshPanel(tab);
+    setStatus("Nenhum filtro salvo ativo.");
+    return;
+  }
+
+  const groups = [];
+  const unresolved = [];
+  for (const f of filters) {
+    const r = filterGroups(tab, f);
+    groups.push(...r.groups);
+    if (r.unresolved) unresolved.push(`${f.name}: "${r.unresolved}"`);
   }
   renderFilterList();
-  const f = state.savedFilters.find((x) => x.id === id);
-  setStatus(turningOff ? "Filtro desativado." : `Filtro "${f ? f.name : id}" aplicado.`);
+
+  if (!groups.length) {
+    setStatus(unresolved.length
+      ? `Nenhum processo casa com ${unresolved.join(", ")}.`
+      : "Os filtros ativos nao tem criterios.", true);
+    refreshPanel(tab);
+    return;
+  }
+  if (unresolved.length) {
+    setStatus(`Ignorando (processo nao encontrado): ${unresolved.join(", ")}`, true);
+  }
+
+  const names = filters.map((f) => f.name);
+  const colorSource = filters
+    .flatMap((f) => filterNodes(f).map((n) => n.text))
+    .filter(Boolean).join(" ");
+  runSearch(tab, names.join(" + "), {
+    groups, id: SAVED_SECTION_ID, savedNames: names, colorSource,
+  });
+}
+
+/** Um filtro e uma lista de nos combinados em OU. Filtros antigos, de campo
+ *  unico, sao lidos como um no so. */
+function filterNodes(f) {
+  if (Array.isArray(f.nodes) && f.nodes.length) return f.nodes;
+  if (f.tag || f.text || f.pid || f.tid || (f.levels && f.levels.length)) {
+    return [{ tag: f.tag || "", text: f.text || "", pid: f.pid || "",
+              tid: f.tid || "", levels: f.levels || [] }];
+  }
+  return [{ tag: "", text: "", pid: "", tid: "", levels: [] }];
+}
+
+let fdNodes = [];
+
+function renderFilterNodes() {
+  const box = el("#fdNodes");
+  box.innerHTML = fdNodes.map((node, i) => `
+    <fieldset class="fd-node" data-i="${i}">
+      <legend>No ${i + 1}${i ? " &mdash; <em>somado ao anterior</em>" : ""}
+        ${fdNodes.length > 1 ? '<button type="button" class="fd-node-del" title="Remover este no">&times;</button>' : ""}
+      </legend>
+      <div class="dialog-row">
+        <label>TAG <input data-f="tag" value="${escapeHtml(node.tag || "")}" placeholder="ex: Telecom"></label>
+        <label>PID ou app <input data-f="pid" value="${escapeHtml(node.pid || "")}" placeholder="ex: 3154 ou sbrowser"></label>
+        <label>TID <input data-f="tid" value="${escapeHtml(node.tid || "")}" placeholder="ex: 8144"></label>
+      </div>
+      <label>Palavras-chave <input data-f="text" value="${escapeHtml(node.text || "")}"
+        placeholder="ex: getSimOperatorMccMnc|mccmnc|plmn  (| = ou, &amp; = e)"></label>
+      <div class="dialog-row">
+        <span class="dialog-label">Niveis</span>
+        <div class="level-toggles" data-f="levels">
+          ${LEVELS.map((l) => `<button type="button" class="level-toggle${(node.levels || []).includes(l) ? " on" : ""}" data-level="${l}">${l}</button>`).join("")}
+        </div>
+      </div>
+    </fieldset>`).join("");
+
+  box.querySelectorAll(".fd-node").forEach((fs) => {
+    const i = Number(fs.dataset.i);
+    fs.querySelectorAll("input[data-f]").forEach((input) => {
+      input.addEventListener("input", () => { fdNodes[i][input.dataset.f] = input.value; });
+    });
+    fs.querySelectorAll(".level-toggle").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        btn.classList.toggle("on");
+        fdNodes[i].levels = [...fs.querySelectorAll(".level-toggle.on")].map((b) => b.dataset.level);
+      });
+    });
+    const del = fs.querySelector(".fd-node-del");
+    if (del) del.addEventListener("click", () => {
+      fdNodes.splice(i, 1);
+      renderFilterNodes();
+    });
+  });
 }
 
 function openFilterDialog(id) {
@@ -1923,21 +3035,17 @@ function openFilterDialog(id) {
   const f = state.savedFilters.find((x) => x.id === id) || {};
   el("#filterDialogTitle").textContent = id ? "Editar filtro" : "Novo filtro";
   el("#fdName").value = f.name || "";
-  el("#fdTag").value = f.tag || "";
-  el("#fdText").value = f.text || "";
-  el("#fdPid").value = f.pid || "";
-  el("#fdTid").value = f.tid || "";
-  el("#fdNegate").checked = !!f.negate;
   el("#fdCase").checked = !!f.caseSensitive;
-  const levels = new Set(f.levels || []);
-  el("#fdLevels").innerHTML = LEVELS.map((l) =>
-    `<button type="button" class="level-toggle${levels.has(l) ? " on" : ""}" data-level="${l}">${l}</button>`).join("");
-  el("#fdLevels").querySelectorAll(".level-toggle").forEach((btn) => {
-    btn.addEventListener("click", () => btn.classList.toggle("on"));
-  });
+  fdNodes = filterNodes(f).map((n) => ({ ...n, levels: [...(n.levels || [])] }));
+  renderFilterNodes();
   filterDialog.hidden = false;
   el("#fdName").focus();
 }
+
+el("#fdAddNode").addEventListener("click", () => {
+  fdNodes.push({ tag: "", text: "", pid: "", tid: "", levels: [] });
+  renderFilterNodes();
+});
 
 el("#filterAddBtn").addEventListener("click", () => openFilterDialog(null));
 el("#filterEditBtn").addEventListener("click", () => {
@@ -1956,12 +3064,12 @@ el("#filterDelBtn").addEventListener("click", () => {
   if (!window.confirm(`Excluir o filtro "${f ? f.name : ""}"?`)) return;
   state.savedFilters = state.savedFilters.filter((x) => x.id !== state.selectedFilterId);
   for (const tab of state.tabs) {
-    if (tab.activeFilterId === state.selectedFilterId) tab.activeFilterId = null;
+    tab.activeFilterIds.delete(state.selectedFilterId);
   }
   state.selectedFilterId = null;
   saveFilters();
   const tab = activeTab();
-  if (tab) refreshPanel(tab);
+  if (tab) syncSavedFilters(tab);
 });
 
 el("#filterExportBtn").addEventListener("click", () => {
@@ -1984,9 +3092,8 @@ el("#filterImportFile").addEventListener("change", async (e) => {
       state.savedFilters.push({
         id: "f" + Date.now() + Math.random().toString(36).slice(2, 6),
         name: f.name,
-        tag: f.tag || "", text: f.text || "", pid: f.pid || "", tid: f.tid || "",
-        levels: Array.isArray(f.levels) ? f.levels : [],
-        negate: !!f.negate, caseSensitive: !!f.caseSensitive,
+        nodes: filterNodes(f),
+        caseSensitive: !!f.caseSensitive,
       });
       added++;
     }
@@ -2006,23 +3113,26 @@ el("#fdSave").addEventListener("click", () => {
     el("#fdName").focus();
     return;
   }
-  const data = {
-    name,
-    tag: el("#fdTag").value.trim(),
-    text: el("#fdText").value.trim(),
-    pid: el("#fdPid").value.trim(),
-    tid: el("#fdTid").value.trim(),
-    levels: [...el("#fdLevels").querySelectorAll(".level-toggle.on")].map((b) => b.dataset.level),
-    negate: el("#fdNegate").checked,
-    caseSensitive: el("#fdCase").checked,
-  };
+  const nodes = fdNodes
+    .map((n) => ({
+      tag: (n.tag || "").trim(), text: (n.text || "").trim(),
+      pid: (n.pid || "").trim(), tid: (n.tid || "").trim(),
+      levels: n.levels || [],
+    }))
+    .filter((n) => n.tag || n.text || n.pid || n.tid || n.levels.length);
+  if (!nodes.length) {
+    setStatus("Preencha ao menos um campo em algum no.", true);
+    return;
+  }
+  const data = { name, nodes, caseSensitive: el("#fdCase").checked };
   const existing = state.savedFilters.find((x) => x.id === state.editingFilterId);
   if (existing) Object.assign(existing, data);
   else state.savedFilters.push({ id: "f" + Date.now() + Math.random().toString(36).slice(2, 6), ...data });
   filterDialog.hidden = true;
   saveFilters();
   const tab = activeTab();
-  if (tab && tab.activeFilterId) refreshPanel(tab);
+  if (tab && tab.activeFilterIds.size) syncSavedFilters(tab);
+  else if (tab) refreshPanel(tab);
 });
 
 const closeFilterDialog = () => { filterDialog.hidden = true; };
@@ -2266,6 +3376,7 @@ async function loadProcessMap(tab) {
     if (data.count) {
       setStatus(`${data.count} PID(s) vinculados ao nome do processo.`);
       refreshPanel(tab);
+      renderDeviceInfo();   // a lista de associacoes ja pode ser consultada
     }
   } catch { /* o nome do processo e um extra; sem ele a coluna PID segue util */ }
   finally { tab.procLoading = false; }
@@ -2394,6 +3505,13 @@ function stepHighlight(hl, delta) {
 function addHighlight(pattern, caseSensitive) {
   pattern = (pattern || "").trim();
   if (!pattern) return null;
+  // Mesma gramatica da busca: "a|b" e "a&b" viram um destaque por palavra,
+  // cada um com sua cor. Espaco continua fazendo parte da frase.
+  if (!/[()[\]\\]/.test(pattern) && /[|&]/.test(pattern)) {
+    let last = null;
+    for (const word of splitAndOr(pattern).words) last = addHighlight(word, caseSensitive);
+    return last;
+  }
   const existing = state.highlights.find((h) => h.pattern === pattern);
   if (existing) {
     existing.enabled = true;
@@ -2470,8 +3588,9 @@ function exportSession() {
       showPids: [...t.showPids], hidePids: [...t.hidePids],
       highlightTags: [...t.highlightTags], highlightPids: [...t.highlightPids],
       bookmarks: [...t.bookmarks],
+      exportMarks: [...t.exportMarks],
       timeRange: t.timeRange,
-      activeFilterId: t.activeFilterId,
+      activeFilterIds: [...t.activeFilterIds],
     })),
   };
   const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
@@ -2516,13 +3635,13 @@ async function importSession(file) {
     tab.limit = saved.limit || DEFAULT_PAGE_SIZE;
     tab.wrapText = !!saved.wrapText;
     tab.liveFilter = saved.liveFilter || "";
-    tab.activeFilterId = saved.activeFilterId || null;
+    for (const id of saved.activeFilterIds || []) tab.activeFilterIds.add(id);
     tab.timeRange = saved.timeRange || null;
     for (const [key, values] of Object.entries({
       levels: saved.levels, showTags: saved.showTags, hideTags: saved.hideTags,
       showPids: saved.showPids, hidePids: saved.hidePids,
       highlightTags: saved.highlightTags, highlightPids: saved.highlightPids,
-      bookmarks: saved.bookmarks,
+      bookmarks: saved.bookmarks, exportMarks: saved.exportMarks,
     })) {
       for (const v of values || []) tab[key].add(v);
     }
@@ -2568,6 +3687,7 @@ document.addEventListener("keydown", (e) => {
     if (!msgDialog.hidden) { msgDialog.hidden = true; return; }
     if (!filterDialog.hidden) { filterDialog.hidden = true; return; }
     if (!glossaryDialog.hidden) { glossaryDialog.hidden = true; return; }
+    if (!browseDialog.hidden) { browseDialog.hidden = true; return; }
     if (!ctxMenu.hidden) { hideContextMenu(); return; }
     const tab = activeTab();
     if (tab && tab.findOpen) { tab.findOpen = false; refreshPanel(tab); }
@@ -2601,6 +3721,9 @@ document.addEventListener("keydown", (e) => {
     return;
   }
   if (mod && e.key.toLowerCase() === "c" && !typing) {
+    // Havendo texto selecionado com o mouse, quem copia e o navegador: copiar
+    // a linha inteira por cima descartaria justamente o trecho escolhido.
+    if (String(window.getSelection() || "").trim()) return;
     const tab = activeTab();
     if (tab && tab.selected.size) {
       e.preventDefault();
