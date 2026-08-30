@@ -725,7 +725,12 @@ function scrollLogToLine(tab, lineNumber, paneIndex) {
     for (const panel of panelsEl.querySelectorAll(selector)) {
       const wrap = panel.querySelector(".log-wrap");
       if (!wrap) continue;
-      let target = panel.querySelector(`tr[data-line="${lineNumber}"]`);
+      // A busca do alvo tem que ficar dentro de `wrap`: o painel tambem
+      // contem a janela de resultados, cujas linhas usam o mesmo atributo
+      // data-line — procurando em `panel` inteiro um duplo clique podia achar
+      // a propria linha clicada no dock e rolar o log por um valor sem
+      // relacao nenhuma com a posicao real dela no arquivo.
+      let target = wrap.querySelector(`tr[data-line="${lineNumber}"]`);
       // Na janela virtual a linha pode estar fora do slice desenhado; pula
       // direto para a posicao pelo indice (altura fixa de linha) e reconcilia
       // o slice antes de procurar de novo.
@@ -736,7 +741,7 @@ function scrollLogToLine(tab, lineNumber, paneIndex) {
           wrap.scrollTop = Math.max(0, idx * ROW_H - wrap.clientHeight / 2 + ROW_H / 2);
           updateVirtualSlice(wrap, tab);
           setTimeout(() => { suppressScrollHide = false; }, 0);
-          target = panel.querySelector(`tr[data-line="${lineNumber}"]`);
+          target = wrap.querySelector(`tr[data-line="${lineNumber}"]`);
         }
       }
       if (!target) continue;
