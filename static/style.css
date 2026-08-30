@@ -228,8 +228,11 @@ button.on-toggle { background: var(--accent); color: var(--accent-fg); border-co
   cursor: pointer;
 }
 .filter-list li:hover { background: var(--bg-hover); }
-.filter-list li.selected { background: var(--accent); color: var(--accent-fg); }
-.filter-list li.selected .filter-meta { color: var(--accent-fg); opacity: .85; }
+.filter-list li.selected { outline: 1px solid var(--accent); outline-offset: -1px; }
+/* Filtro ativo: o botao fica ligado e o conjunto vira uma secao de resultados. */
+.filter-list li.on { background: color-mix(in srgb, var(--accent) 20%, transparent); }
+.filter-list li.on .filter-name { font-weight: 600; }
+.filter-onoff { color: var(--accent); font-size: 10px; flex: 0 0 auto; }
 .filter-list .filter-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .filter-list .filter-meta { font-size: 10px; color: var(--fg-dim); }
 .filter-list .neg { color: var(--lvl-E); font-weight: 700; }
@@ -722,6 +725,21 @@ mark.hl-7, .hl-chip.hl-7, .hl-swatch.hl-7, .fd-term.hl-7 { background: #fcc2d7; 
   font-size: 10.5px;
 }
 .fd-term-plain { background: var(--bg-header); color: var(--fg-dim); }
+/* Bandeira que identifica a secao dos filtros salvos. */
+.fd-term-flag {
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-weight: 700;
+  letter-spacing: .03em;
+}
+/* Rotulo do campo dentro da etiqueta: TAG, PID, TID... */
+.fd-fieldflag {
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  opacity: .65;
+  margin-right: 4px;
+}
 .fd-count { color: var(--fg-dim); font-size: 11px; white-space: nowrap; }
 .fd-err { color: var(--lvl-E); }
 .fd-check { display: flex; align-items: center; gap: 3px; font-size: 11px; color: var(--fg-dim); }

@@ -270,7 +270,7 @@ function newTab(path) {
     highlightTags: new Set(),
     highlightPids: new Set(),
     liveFilter: "",
-    activeFilterId: null,
+    activeFilterIds: new Set(),
     wrapText: false,
     // Estado de interacao.
     selected: new Set(),
@@ -348,6 +348,8 @@ function setActiveTab(id) {
   state.panes[state.focusedPane] = id;
   renderTabs();
   renderPanels();
+  // Os filtros ativos sao por aba; a lista precisa refletir a aba atual.
+  renderFilterList();
 }
 
 function activeTab() {
@@ -612,7 +614,12 @@ function termsOf(query, start = 0, tab = null) {
     // "sbrows" nao aparece na linha, mas "10076" aparece.
     if (term.pids && term.pids.length) {
       for (const pid of term.pids.slice(0, 4)) {
-        out.push({ pattern: `\\b${pid}\\b`, label: pid, color: color % HL_COLORS });
+        out.push({
+          pattern: `\\b${pid}\\b`, label: pid, color: color % HL_COLORS,
+          field: term.field,
+          // Quem buscou por nome precisa ver a que processo o numero pertence.
+          note: (tab && tab.procMap && tab.procMap[pid]) || null,
+        });
         color++;
       }
       continue;
@@ -622,7 +629,7 @@ function termsOf(query, start = 0, tab = null) {
     // colchetes o "|" pode ser interno ao regex, entao fica uma cor so.
     const parts = /[()[\]\\]/.test(src) ? [src] : src.split("|").filter(Boolean);
     for (const part of parts) {
-      out.push({ pattern: part, label: part, color: color % HL_COLORS });
+      out.push({ pattern: part, label: part, color: color % HL_COLORS, field: term.field });
       color++;
     }
   }
@@ -1174,8 +1181,9 @@ async function searchAcrossFiles(tab, query, scope) {
 
 /** Roda a busca e guarda o resultado como mais uma secao da janela de baixo.
  *  Buscar de novo o mesmo termo atualiza a secao existente em vez de duplicar. */
-async function runSearch(tab, query, { sectionId = null, offset = 0,
-                                        groups = null, filter = null } = {}) {
+async function runSearch(tab, query, { sectionId = null, offset = 0, groups = null,
+                                        filter = null, id = null, savedNames = null,
+                                        colorSource = null } = {}) {
   query = (query ?? tab.liveFilter).trim();
   if (!query) {
     setStatus("Digite algo na caixa de busca.", true);
@@ -1191,15 +1199,16 @@ async function runSearch(tab, query, { sectionId = null, offset = 0,
 
   if (!section) {
     // As palavras coloridas de um filtro sao as palavras-chave dos seus nos.
-    const colorSource = filter
+    const source = colorSource ?? (filter
       ? filterNodes(filter).map((n) => n.text).filter(Boolean).join(" ")
-      : query;
+      : query);
     section = {
-      id: "s" + Date.now() + Math.random().toString(36).slice(2, 5),
+      id: id || ("s" + Date.now() + Math.random().toString(36).slice(2, 5)),
       query,
       scope,
       groups,
-      terms: termsOf(colorSource, tab.colorCursor || 0, tab),
+      savedNames,
+      terms: termsOf(source, tab.colorCursor || 0, tab),
       results: null,
       collapsed: false,
       exportChecked: false,
@@ -1312,9 +1321,29 @@ function clickNotDrag(container, handler) {
   });
 }
 
+// Rotulo do campo mostrado na etiqueta, para nao restar duvida se aquela
+// palavra foi procurada na TAG, no PID ou no texto da mensagem.
+const FIELD_LABEL = {
+  tag: "TAG", pid: "PID", tid: "TID", uid: "UID", msg: "TEXTO", level: "NIVEL",
+};
+
 function chipsHtml(section) {
-  return section.terms.map((t) =>
-    `<span class="fd-term hl-${t.color}">${escapeHtml(t.label ?? t.pattern)}</span>`).join("");
+  const chips = [];
+  if (section.savedNames) {
+    chips.push('<span class="fd-term fd-term-flag">FILTROS SALVOS</span>');
+    for (const name of section.savedNames) {
+      chips.push(`<span class="fd-term fd-term-plain">${escapeHtml(name)}</span>`);
+    }
+  }
+  for (const t of section.terms) {
+    const flag = t.field && FIELD_LABEL[t.field]
+      ? `<b class="fd-fieldflag">${FIELD_LABEL[t.field]}</b>`
+      : "";
+    const title = t.note ? ` title="${escapeHtml(t.note)}"` : "";
+    chips.push(`<span class="fd-term hl-${t.color}"${title}>` +
+      `${flag}${escapeHtml(t.label ?? t.pattern)}</span>`);
+  }
+  return chips.join("");
 }
 
 function resultRowHtml(tab, section, i) {
@@ -1386,6 +1415,12 @@ function buildSection(tab, section) {
     refreshPanel(tab);
   });
   box.querySelector(".fd-close").addEventListener("click", () => {
+    if (section.id === SAVED_SECTION_ID) {
+      // Fechar a secao dos filtros salvos e o mesmo que desligar todos.
+      tab.activeFilterIds.clear();
+      syncSavedFilters(tab);
+      return;
+    }
     tab.findSections = tab.findSections.filter((x) => x.id !== section.id);
     refreshPanel(tab);
   });
@@ -1502,6 +1537,8 @@ function buildFindDock(tab) {
   });
   dock.querySelector('[data-fd="clear"]').addEventListener("click", () => {
     tab.findSections = [];
+    tab.activeFilterIds.clear();
+    renderFilterList();
     refreshPanel(tab);
   });
   dock.querySelector('[data-fd="export"]').addEventListener("click", () => exportChecked(tab));
@@ -1779,7 +1816,7 @@ function resetFilters(tab) {
   tab.highlightTags.clear();
   tab.highlightPids.clear();
   tab.liveFilter = "";
-  tab.activeFilterId = null;
+  tab.activeFilterIds.clear();
   tab.searchTerm = "";
   tab.timeRange = null;
   recomputeSearch(tab);
@@ -2140,9 +2177,13 @@ function renderFilterList() {
     filterListEl.appendChild(li);
     return;
   }
+  // Cada filtro e um botao de liga/desliga: varios podem ficar ativos ao mesmo
+  // tempo, e juntos formam uma unica secao de resultados.
+  const tab = activeTab();
   for (const f of state.savedFilters) {
+    const on = !!(tab && tab.activeFilterIds.has(f.id));
     const li = document.createElement("li");
-    li.className = state.selectedFilterId === f.id ? "selected" : "";
+    li.className = (on ? "on " : "") + (state.selectedFilterId === f.id ? "selected" : "");
     const nodes = filterNodes(f);
     const bits = nodes.map((n) => [
       n.levels && n.levels.length ? n.levels.join("") : "",
@@ -2152,10 +2193,16 @@ function renderFilterList() {
       n.text || "",
     ].filter(Boolean).join(" ")).join("  ou  ");
     li.innerHTML =
+      `<span class="filter-onoff">${on ? "&#9679;" : "&#9675;"}</span>` +
       `<span class="filter-name">${escapeHtml(f.name)}</span>` +
       `<span class="filter-meta">${nodes.length > 1 ? nodes.length + " nos: " : ""}` +
-      `${escapeHtml(bits.slice(0, 44))}</span>`;
-    li.addEventListener("click", () => applySavedFilter(f.id));
+      `${escapeHtml(bits.slice(0, 40))}</span>`;
+    li.title = (on ? "Ativo — clique para desligar" : "Clique para ativar") +
+      "\nDuplo clique edita o filtro";
+    li.addEventListener("click", () => {
+      state.selectedFilterId = f.id;   // qual o Editar/Excluir vao pegar
+      toggleSavedFilter(f.id);
+    });
     li.addEventListener("dblclick", () => openFilterDialog(f.id));
     filterListEl.appendChild(li);
   }
@@ -2182,25 +2229,67 @@ function filterGroups(tab, f) {
   return { groups, unresolved };
 }
 
-/** Aplicar um filtro salvo roda a busca e cria uma secao; o log nao muda. */
-function applySavedFilter(id) {
+// Todos os filtros salvos ativos vivem numa secao so, com este id fixo: ligar
+// ou desligar um filtro atualiza essa mesma secao em vez de empilhar outras.
+const SAVED_SECTION_ID = "filtros-salvos";
+
+/** Liga/desliga um filtro salvo na aba atual. Varios podem ficar ativos ao
+ *  mesmo tempo, e o conjunto vira uma unica secao de resultados. */
+function toggleSavedFilter(id) {
   const tab = activeTab();
-  state.selectedFilterId = id;
-  renderFilterList();
-  const f = state.savedFilters.find((x) => x.id === id);
-  if (!f) return;
   if (!tab) {
     setStatus("Abra um arquivo antes de aplicar o filtro.", true);
     return;
   }
-  const { groups, unresolved } = filterGroups(tab, f);
-  if (!groups.length) {
-    setStatus(unresolved
-      ? `Nenhum processo casa com "${unresolved}".`
-      : "Filtro sem criterios.", true);
+  if (tab.activeFilterIds.has(id)) tab.activeFilterIds.delete(id);
+  else tab.activeFilterIds.add(id);
+  syncSavedFilters(tab);
+}
+
+/** Recalcula a secao dos filtros salvos a partir dos que estao ativos. */
+function syncSavedFilters(tab) {
+  const idx = tab.findSections.findIndex((x) => x.id === SAVED_SECTION_ID);
+  if (idx >= 0) tab.findSections.splice(idx, 1);
+
+  const filters = [...tab.activeFilterIds]
+    .map((id) => state.savedFilters.find((f) => f.id === id))
+    .filter(Boolean);
+
+  // Sem nenhum filtro ativo a secao simplesmente deixa de existir.
+  if (!filters.length) {
+    renderFilterList();
+    refreshPanel(tab);
+    setStatus("Nenhum filtro salvo ativo.");
     return;
   }
-  runSearch(tab, f.name, { groups, filter: f });
+
+  const groups = [];
+  const unresolved = [];
+  for (const f of filters) {
+    const r = filterGroups(tab, f);
+    groups.push(...r.groups);
+    if (r.unresolved) unresolved.push(`${f.name}: "${r.unresolved}"`);
+  }
+  renderFilterList();
+
+  if (!groups.length) {
+    setStatus(unresolved.length
+      ? `Nenhum processo casa com ${unresolved.join(", ")}.`
+      : "Os filtros ativos nao tem criterios.", true);
+    refreshPanel(tab);
+    return;
+  }
+  if (unresolved.length) {
+    setStatus(`Ignorando (processo nao encontrado): ${unresolved.join(", ")}`, true);
+  }
+
+  const names = filters.map((f) => f.name);
+  const colorSource = filters
+    .flatMap((f) => filterNodes(f).map((n) => n.text))
+    .filter(Boolean).join(" ");
+  runSearch(tab, names.join(" + "), {
+    groups, id: SAVED_SECTION_ID, savedNames: names, colorSource,
+  });
 }
 
 /** Um filtro e uma lista de nos combinados em OU. Filtros antigos, de campo
@@ -2291,12 +2380,12 @@ el("#filterDelBtn").addEventListener("click", () => {
   if (!window.confirm(`Excluir o filtro "${f ? f.name : ""}"?`)) return;
   state.savedFilters = state.savedFilters.filter((x) => x.id !== state.selectedFilterId);
   for (const tab of state.tabs) {
-    if (tab.activeFilterId === state.selectedFilterId) tab.activeFilterId = null;
+    tab.activeFilterIds.delete(state.selectedFilterId);
   }
   state.selectedFilterId = null;
   saveFilters();
   const tab = activeTab();
-  if (tab) refreshPanel(tab);
+  if (tab) syncSavedFilters(tab);
 });
 
 el("#filterExportBtn").addEventListener("click", () => {
@@ -2358,7 +2447,8 @@ el("#fdSave").addEventListener("click", () => {
   filterDialog.hidden = true;
   saveFilters();
   const tab = activeTab();
-  if (tab) refreshPanel(tab);
+  if (tab && tab.activeFilterIds.size) syncSavedFilters(tab);
+  else if (tab) refreshPanel(tab);
 });
 
 const closeFilterDialog = () => { filterDialog.hidden = true; };
@@ -2808,7 +2898,7 @@ function exportSession() {
       bookmarks: [...t.bookmarks],
       exportMarks: [...t.exportMarks],
       timeRange: t.timeRange,
-      activeFilterId: t.activeFilterId,
+      activeFilterIds: [...t.activeFilterIds],
     })),
   };
   const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
@@ -2853,7 +2943,7 @@ async function importSession(file) {
     tab.limit = saved.limit || DEFAULT_PAGE_SIZE;
     tab.wrapText = !!saved.wrapText;
     tab.liveFilter = saved.liveFilter || "";
-    tab.activeFilterId = saved.activeFilterId || null;
+    for (const id of saved.activeFilterIds || []) tab.activeFilterIds.add(id);
     tab.timeRange = saved.timeRange || null;
     for (const [key, values] of Object.entries({
       levels: saved.levels, showTags: saved.showTags, hideTags: saved.hideTags,
