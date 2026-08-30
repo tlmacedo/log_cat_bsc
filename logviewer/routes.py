@@ -306,6 +306,54 @@ def put_saved_filters():
     return jsonify({"ok": True, "count": len(body)})
 
 
+@api.get("/project_entries")
+def get_project_entries():
+    """Pastas/arquivos extras fixados na barra lateral, cada um com sua
+    propria raiz (podem estar em qualquer lugar do disco). Compartilhado
+    entre distribuicoes do mesmo jeito que /api/saved_filters."""
+    return jsonify({"entries": prefs.load_project_entries()})
+
+
+@api.put("/project_entries")
+def put_project_entries():
+    body = request.get_json(silent=True)
+    if not isinstance(body, list):
+        return jsonify({"error": "Corpo precisa ser uma lista de entradas."}), 400
+
+    entries = []
+    for item in body:
+        if not isinstance(item, dict) or not item.get("path"):
+            continue
+        path = os.path.realpath(os.path.expanduser(item["path"]))
+        if not os.path.exists(path) or not os.access(path, os.R_OK):
+            continue
+        entries.append({"path": path, "is_dir": os.path.isdir(path)})
+
+    try:
+        prefs.save_project_entries(entries)
+    except (OSError, ValueError) as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"ok": True, "entries": entries})
+
+
+@api.get("/hidden_paths")
+def get_hidden_paths():
+    """Caminhos removidos da barra lateral (sem apagar do disco)."""
+    return jsonify({"paths": prefs.load_hidden_paths()})
+
+
+@api.put("/hidden_paths")
+def put_hidden_paths():
+    body = request.get_json(silent=True)
+    if not isinstance(body, list) or not all(isinstance(p, str) for p in body):
+        return jsonify({"error": "Corpo precisa ser uma lista de caminhos."}), 400
+    try:
+        prefs.save_hidden_paths(body)
+    except (OSError, ValueError) as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"ok": True, "count": len(body)})
+
+
 @api.get("/usb_devices")
 def get_usb_devices():
     """Aparelhos Android ligados na USB, com o que identifica cada um."""
