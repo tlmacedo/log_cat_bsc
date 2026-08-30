@@ -1,0 +1,8 @@
+{
+  "identifier": "default",
+  "description": "Permissoes da janela principal do Log Viewer BSC",
+  "windows": ["main"],
+  "permissions": [
+    "core:default"
+  ]
+}

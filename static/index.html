@@ -47,6 +47,10 @@
       </div>
 
       <section class="side-pane active" data-pane="files">
+        <div class="side-toolbar">
+          <button id="addEntryBtn" title="Adicionar um arquivo ou pasta de qualquer lugar aos arquivos do projeto">&#10133; Adicionar</button>
+          <span class="side-hint file-drop-hint">ou arraste um arquivo/pasta aqui</span>
+        </div>
         <div id="tree"></div>
       </section>
 
@@ -140,7 +144,7 @@
   <div id="browseDialog" class="dialog-backdrop" hidden>
     <div class="dialog dialog-narrow">
       <header>
-        <strong>Escolher a pasta com os logs</strong>
+        <strong id="browseTitle">Escolher a pasta com os logs</strong>
         <button id="browseClose" class="icon-btn">&times;</button>
       </header>
       <div class="browse-body">

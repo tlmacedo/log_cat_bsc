@@ -174,11 +174,28 @@ el("#sidebarResize").addEventListener("mousedown", (e) => {
 
 const browseDialog = el("#browseDialog");
 let browsePathAtual = "";
+// "root": escolher a pasta principal (#rootInput), como sempre.
+// "add-entry": adicionar um arquivo OU pasta aos arquivos do projeto — o
+// navegador nunca revela o caminho real de algo escolhido pelo usuario, entao
+// mesmo pra "adicionar" precisa ser o servidor navegando (mesma razao de
+// /api/browse existir).
+let browseMode = "root";
 
 el("#browseBtn").addEventListener("click", () => {
+  browseMode = "root";
+  el("#browseTitle").textContent = "Escolher a pasta com os logs";
+  el("#browsePick").textContent = "Usar esta pasta";
   const atual = el("#rootInput").value.trim();
   browseDialog.hidden = false;
   openBrowse(atual || (state.config && state.config.default_root) || "");
+});
+
+el("#addEntryBtn").addEventListener("click", () => {
+  browseMode = "add-entry";
+  el("#browseTitle").textContent = "Adicionar arquivo ou pasta aos arquivos do projeto";
+  el("#browsePick").textContent = "Adicionar esta pasta";
+  browseDialog.hidden = false;
+  openBrowse(state.root || (state.config && state.config.default_root) || "");
 });
 
 const fecharBrowse = () => { browseDialog.hidden = true; };
@@ -196,8 +213,12 @@ el("#browsePath").addEventListener("keydown", (e) => {
 el("#browsePick").addEventListener("click", () => {
   if (!browsePathAtual) return;
   fecharBrowse();
-  el("#rootInput").value = browsePathAtual;
-  loadRoot();
+  if (browseMode === "add-entry") {
+    addProjectEntry(browsePathAtual, true);
+  } else {
+    el("#rootInput").value = browsePathAtual;
+    loadRoot();
+  }
 });
 
 let browseParent = null;
@@ -218,12 +239,22 @@ async function openBrowse(path) {
     el("#browsePath").value = data.path;
     el("#browseUp").disabled = !data.parent;
 
-    lista.innerHTML = data.dirs.length
-      ? data.dirs.map((d) =>
-          `<li class="browse-dir" data-path="${escapeHtml(d.path)}">` +
-          `\u{1F4C1} ${escapeHtml(d.name)}</li>`).join("") +
-        (data.truncated ? '<li class="browse-empty">(lista truncada)</li>' : "")
-      : '<li class="browse-empty">Nenhuma subpasta aqui.</li>';
+    const dirsHtml = data.dirs.map((d) =>
+      `<li class="browse-dir" data-path="${escapeHtml(d.path)}">` +
+      `\u{1F4C1} ${escapeHtml(d.name)}</li>`).join("");
+    // No modo de adicionar, arquivos tambem aparecem e sao escolhiveis um a
+    // um — no modo de escolher a pasta raiz eles nao interessam.
+    const filesHtml = browseMode === "add-entry" && data.file_list
+      ? data.file_list.map((f) =>
+          `<li class="browse-file" data-path="${escapeHtml(f.path)}" title="Adicionar este arquivo">` +
+          `\u{1F4C4} ${escapeHtml(f.name)}</li>`).join("")
+      : "";
+    const semNada = browseMode === "add-entry"
+      ? !dirsHtml && !filesHtml
+      : !dirsHtml;
+    lista.innerHTML = dirsHtml + filesHtml +
+      (data.truncated ? '<li class="browse-empty">(lista truncada)</li>' : "") +
+      (semNada ? `<li class="browse-empty">${browseMode === "add-entry" ? "Pasta vazia." : "Nenhuma subpasta aqui."}</li>` : "");
 
     // O numero de arquivos ajuda a reconhecer a pasta certa sem entrar nela.
     el("#browseInfo").textContent = data.files
@@ -233,6 +264,12 @@ async function openBrowse(path) {
 
     lista.querySelectorAll(".browse-dir").forEach((li) => {
       li.addEventListener("click", () => openBrowse(li.dataset.path));
+    });
+    lista.querySelectorAll(".browse-file").forEach((li) => {
+      li.addEventListener("click", () => {
+        fecharBrowse();
+        addProjectEntry(li.dataset.path, false);
+      });
     });
 
     if (data.shortcuts) {
@@ -292,38 +329,73 @@ async function loadRoot() {
     setRootDevice(null);
   }
   setStatus("Carregando arvore...");
-  treeEl.innerHTML = "";
+  const data = await fetchTreeEntries(root);
+  if (data.error) {
+    // Dentro do container so existe o que foi montado; dizer isso evita o
+    // usuario ficar procurando um caminho do host que nunca vai aparecer.
+    const dica = state.config && state.config.in_container
+      ? ` O app esta rodando em container e so enxerga a pasta montada` +
+        `${state.config.default_root ? " (" + state.config.default_root + ")" : ""}.`
+      : "";
+    setStatus(data.error + dica, true);
+    return false;
+  }
+  // So guarda o caminho depois de saber que ele funciona: guardar antes fazia
+  // um caminho invalido voltar a cada recarga da pagina.
+  persist(ROOT_KEY, root);
+  state.rootEntries = data.entries;
+  renderFilesPane();
+  setStatus(`${data.entries.length} itens` +
+    (data.truncated ? ` (truncado em ${data.max_entries})` : ""));
+  return true;
+}
+
+async function fetchTreeEntries(root) {
   try {
     const res = await fetch(`/api/tree?root=${encodeURIComponent(root)}`);
     const data = await res.json();
-    if (!res.ok) {
-      // Dentro do container so existe o que foi montado; dizer isso evita o
-      // usuario ficar procurando um caminho do host que nunca vai aparecer.
-      const dica = state.config && state.config.in_container
-        ? ` O app esta rodando em container e so enxerga a pasta montada` +
-          `${state.config.default_root ? " (" + state.config.default_root + ")" : ""}.`
-        : "";
-      setStatus((data.error || "Erro ao carregar pasta") + dica, true);
-      return false;
-    }
-    // So guarda o caminho depois de saber que ele funciona: guardar antes fazia
-    // um caminho invalido voltar a cada recarga da pagina.
-    persist(ROOT_KEY, root);
-    renderTree(data.entries);
-    setStatus(`${data.entries.length} itens` +
-      (data.truncated ? ` (truncado em ${data.max_entries})` : ""));
-    return true;
+    if (!res.ok) return { error: data.error || "Erro ao carregar pasta" };
+    return data;
   } catch (err) {
-    setStatus("Falha na requisicao: " + err, true);
-    return false;
+    return { error: "Falha na requisicao: " + err };
   }
 }
 
-function renderTree(entries) {
-  const root = { children: new Map(), is_dir: true, path: "" };
+/** Junta uma raiz absoluta com um caminho relativo que o /api/tree devolveu
+ *  (relativo pode vir vazio, para a propria raiz). */
+function joinPath(root, rel) {
+  if (!rel) return root;
+  return root.replace(/\/+$/, "") + "/" + rel;
+}
+
+function pathBasename(p) {
+  const i = p.replace(/\/+$/, "").lastIndexOf("/");
+  return i === -1 ? p : p.slice(i + 1);
+}
+
+function pathDirname(p) {
+  const i = p.lastIndexOf("/");
+  return i <= 0 ? "/" : p.slice(0, i);
+}
+
+/** Um caminho (arquivo ou pasta, em qualquer raiz) foi removido dos arquivos
+ *  do projeto: some da barra lateral sem tocar em nada no disco. */
+function isHidden(absPath) {
+  for (const h of state.hiddenPaths) {
+    if (absPath === h || absPath.startsWith(h + "/")) return true;
+  }
+  return false;
+}
+
+/** Monta o modelo em arvore (pastas/arquivos aninhados) a partir da lista
+ *  achatada que o /api/tree devolve para uma raiz, pulando o que foi
+ *  removido dos arquivos do projeto. */
+function buildTreeModel(root, entries) {
+  const rootNode = { children: new Map(), is_dir: true, path: "" };
   for (const entry of entries) {
+    if (isHidden(joinPath(root, entry.path))) continue;
     const parts = entry.path.split("/");
-    let node = root;
+    let node = rootNode;
     for (let i = 0; i < parts.length; i++) {
       const last = i === parts.length - 1;
       const key = parts[i];
@@ -339,11 +411,97 @@ function renderTree(entries) {
       node = node.children.get(key);
     }
   }
-  treeEl.innerHTML = "";
-  renderNode(root, treeEl);
+  return rootNode;
 }
 
-function renderNode(node, container) {
+/** Redesenha a aba "Arquivos" inteira: a arvore da pasta raiz principal (se
+ *  houver) seguida de cada item extra fixado nos arquivos do projeto — cada
+ *  um com a sua propria raiz, podendo estar em qualquer lugar do disco. */
+function renderFilesPane() {
+  treeEl.innerHTML = "";
+  if (state.root && state.rootEntries) {
+    const model = buildTreeModel(state.root, state.rootEntries);
+    renderNode(model, treeEl, { root: state.root });
+  }
+  for (const entryItem of state.projectEntries) {
+    treeEl.appendChild(renderProjectEntryRow(entryItem));
+  }
+  if (!state.root && !state.projectEntries.length) {
+    treeEl.innerHTML = '<p class="side-hint">Carregue uma pasta ou adicione um arquivo/pasta ' +
+      'aos arquivos do projeto.</p>';
+  }
+}
+
+const REMOVE_BTN_HTML =
+  '<button class="entry-remove" tabindex="-1" ' +
+  'title="Remover dos arquivos do projeto (nao apaga do disco)">&times;</button>';
+
+/** Clique no "x" ou tecla Delete/Backspace com a linha focada removem o item
+ *  — sempre so da lista de exibicao, nunca do disco. */
+function wireRemove(row, onRemove) {
+  row.querySelector(".entry-remove").addEventListener("click", (e) => {
+    e.stopPropagation();
+    onRemove();
+  });
+  row.addEventListener("keydown", (e) => {
+    if (e.key === "Delete" || e.key === "Backspace") {
+      e.preventDefault();
+      onRemove();
+    }
+  });
+}
+
+/** Um item de `state.projectEntries`: sua propria linha de topo (com raiz
+ *  independente), removivel por inteiro. Pastas carregam a arvore so quando
+ *  expandidas pela primeira vez. */
+function renderProjectEntryRow(entryItem) {
+  const wrap = document.createElement("div");
+  const name = pathBasename(entryItem.path) || entryItem.path;
+  const row = document.createElement("div");
+  row.className = "entry project-entry " + (entryItem.is_dir ? "dir" : "file text");
+  row.tabIndex = 0;
+  row.title = entryItem.path;
+
+  const childContainer = document.createElement("div");
+  if (entryItem.is_dir) {
+    childContainer.style.display = "none";
+    childContainer.style.paddingLeft = "14px";
+  }
+
+  const label = () => (entryItem.is_dir
+    ? (childContainer.style.display !== "none" ? "▾ " : "▸ ")
+    : "") + `\u{1F4CC} ${escapeHtml(name)}`;
+  row.innerHTML = `<span class="entry-label">${label()}</span>` + REMOVE_BTN_HTML;
+
+  row.addEventListener("click", async (e) => {
+    if (e.target.closest(".entry-remove")) return;
+    if (!entryItem.is_dir) {
+      openFile(pathDirname(entryItem.path), pathBasename(entryItem.path));
+      return;
+    }
+    const open = childContainer.style.display !== "none";
+    childContainer.style.display = open ? "none" : "block";
+    row.querySelector(".entry-label").innerHTML = label();
+    if (!open && childContainer.childElementCount === 0) {
+      childContainer.innerHTML = '<p class="side-hint">Carregando...</p>';
+      const data = await fetchTreeEntries(entryItem.path);
+      if (data.error) {
+        childContainer.innerHTML = `<p class="side-hint">${escapeHtml(data.error)}</p>`;
+        return;
+      }
+      childContainer.innerHTML = "";
+      const model = buildTreeModel(entryItem.path, data.entries);
+      renderNode(model, childContainer, { root: entryItem.path });
+    }
+  });
+  wireRemove(row, () => removeProjectEntry(entryItem.path));
+
+  wrap.appendChild(row);
+  if (entryItem.is_dir) wrap.appendChild(childContainer);
+  return wrap;
+}
+
+function renderNode(node, container, ctx) {
   const dirs = [];
   const files = [];
   for (const child of node.children.values()) {
@@ -355,18 +513,22 @@ function renderNode(node, container) {
   for (const dir of dirs) {
     const row = document.createElement("div");
     row.className = "entry dir";
-    row.textContent = "▸ " + dir.name;
+    row.tabIndex = 0;
+    const label = (open) => (open ? "▾ " : "▸ ") + escapeHtml(dir.name);
+    row.innerHTML = `<span class="entry-label">${label(false)}</span>` + REMOVE_BTN_HTML;
     const childContainer = document.createElement("div");
     childContainer.style.display = "none";
     childContainer.style.paddingLeft = "14px";
-    row.addEventListener("click", () => {
+    row.addEventListener("click", (e) => {
+      if (e.target.closest(".entry-remove")) return;
       const open = childContainer.style.display !== "none";
       childContainer.style.display = open ? "none" : "block";
-      row.textContent = (open ? "▸ " : "▾ ") + dir.name;
+      row.querySelector(".entry-label").innerHTML = label(!open);
       if (!open && childContainer.childElementCount === 0) {
-        renderNode(dir, childContainer);
+        renderNode(dir, childContainer, ctx);
       }
     });
+    wireRemove(row, () => hidePath(joinPath(ctx.root, dir.path)));
     container.appendChild(row);
     container.appendChild(childContainer);
   }
@@ -375,19 +537,175 @@ function renderNode(node, container) {
     const row = document.createElement("div");
     const isText = file.meta && file.meta.likely_text !== false;
     row.className = "entry file " + (isText ? "text" : "binary");
-    row.innerHTML = `${escapeHtml(file.name)} <span class="size">${fmtSize(file.meta ? file.meta.size : null)}</span>`;
-    row.addEventListener("click", () => openFile(file.path));
+    row.tabIndex = 0;
+    row.innerHTML =
+      `<span class="entry-label">${escapeHtml(file.name)} <span class="size">${fmtSize(file.meta ? file.meta.size : null)}</span></span>` +
+      REMOVE_BTN_HTML;
+    row.addEventListener("click", (e) => {
+      if (e.target.closest(".entry-remove")) return;
+      openFile(ctx.root, file.path);
+    });
+    wireRemove(row, () => hidePath(joinPath(ctx.root, file.path)));
     container.appendChild(row);
   }
 }
 
 // ---------------------------------------------------------------------------
+// Arquivos do projeto: itens extras fixados na barra lateral (podem estar em
+// qualquer lugar do disco) e caminhos removidos da exibicao. Compartilhados
+// entre web/Mac/Windows via o backend (o mesmo motivo do FILTERS_KEY).
+// ---------------------------------------------------------------------------
+
+const PROJECT_ENTRIES_KEY = "logviewer.projectEntries";
+const HIDDEN_PATHS_KEY = "logviewer.hiddenPaths";
+state.projectEntries = store(PROJECT_ENTRIES_KEY, []);
+state.hiddenPaths = new Set(store(HIDDEN_PATHS_KEY, []));
+
+async function syncProjectEntries() {
+  persist(PROJECT_ENTRIES_KEY, state.projectEntries);
+  try {
+    const res = await fetch("/api/project_entries", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(state.projectEntries),
+    });
+    if (res.ok) {
+      // O servidor decide arquivo/pasta pelo que existe de verdade no disco
+      // (util quando quem chamou nao tinha certeza, como um item arrastado).
+      const data = await res.json();
+      if (Array.isArray(data.entries)) {
+        state.projectEntries = data.entries;
+        persist(PROJECT_ENTRIES_KEY, state.projectEntries);
+        renderFilesPane();
+      }
+    }
+  } catch { /* sem servidor: continua valendo localmente */ }
+}
+
+async function syncHiddenPaths() {
+  persist(HIDDEN_PATHS_KEY, [...state.hiddenPaths]);
+  try {
+    await fetch("/api/hidden_paths", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify([...state.hiddenPaths]),
+    });
+  } catch { /* sem servidor: continua valendo localmente */ }
+}
+
+async function loadProjectPrefsFromServer() {
+  try {
+    const [entriesRes, hiddenRes] = await Promise.all([
+      fetch("/api/project_entries"), fetch("/api/hidden_paths"),
+    ]);
+    if (entriesRes.ok) {
+      const data = await entriesRes.json();
+      if (Array.isArray(data.entries)) state.projectEntries = data.entries;
+    }
+    if (hiddenRes.ok) {
+      const data = await hiddenRes.json();
+      if (Array.isArray(data.paths)) state.hiddenPaths = new Set(data.paths);
+    }
+    persist(PROJECT_ENTRIES_KEY, state.projectEntries);
+    persist(HIDDEN_PATHS_KEY, [...state.hiddenPaths]);
+    renderFilesPane();
+  } catch { /* offline: segue com o cache local */ }
+}
+loadProjectPrefsFromServer();
+
+function addProjectEntry(path, isDir) {
+  if (state.projectEntries.some((e) => e.path === path)) {
+    setStatus("Esse item ja esta nos arquivos do projeto.");
+    return;
+  }
+  // Reaparecer depois de ter sido removido e o comportamento esperado de
+  // "adicionar de novo", entao desfaz uma remocao anterior deste mesmo item.
+  state.hiddenPaths.delete(path);
+  state.projectEntries.push({ path, is_dir: isDir });
+  syncProjectEntries();
+  syncHiddenPaths();
+  renderFilesPane();
+  setStatus(`Adicionado aos arquivos do projeto: ${path}`);
+}
+
+function removeProjectEntry(path) {
+  state.projectEntries = state.projectEntries.filter((e) => e.path !== path);
+  syncProjectEntries();
+  renderFilesPane();
+  setStatus("Removido dos arquivos do projeto (o arquivo/pasta continua no disco).");
+}
+
+function hidePath(absPath) {
+  state.hiddenPaths.add(absPath);
+  syncHiddenPaths();
+  renderFilesPane();
+  setStatus("Removido dos arquivos do projeto (o arquivo/pasta continua no disco).");
+}
+
+// ---------------------------------------------------------------------------
+// Arrastar um arquivo/pasta do sistema operacional para a barra lateral.
+//
+// Um navegador comum nunca entrega o caminho absoluto de um arquivo
+// arrastado do Finder/Explorer (removido de todo navegador por seguranca ha
+// anos) — so da pra ler o CONTEUDO dele, o que exigiria copiar o arquivo pro
+// servidor, contrariando o resto do app (que sempre le em vez de copiar). O
+// app desktop (Tauri) e diferente: a janela nativa recebe o caminho de
+// verdade, entao o drag-and-drop funciona igual ao que foi pedido; no
+// navegador comum, tentamos o caminho quando o proprio navegador o expoe (js
+// so sabe depois de tentar) e, se nao vier, apontamos pro botao "Adicionar"
+// — mesmo resultado final, um clique a mais.
+// ---------------------------------------------------------------------------
+
+const filesPaneEl = document.querySelector('.side-pane[data-pane="files"]');
+
+if (filesPaneEl) {
+  filesPaneEl.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    filesPaneEl.classList.add("drag-over");
+  });
+  filesPaneEl.addEventListener("dragleave", (e) => {
+    if (!filesPaneEl.contains(e.relatedTarget)) filesPaneEl.classList.remove("drag-over");
+  });
+  filesPaneEl.addEventListener("drop", (e) => {
+    e.preventDefault();
+    filesPaneEl.classList.remove("drag-over");
+    const paths = [...(e.dataTransfer?.files || [])].map((f) => f.path).filter(Boolean);
+    if (!paths.length) {
+      setStatus('Este navegador nao entrega o caminho real do arquivo arrastado. ' +
+        'Use o botao "Adicionar" para escolher pelo servidor.', true);
+      return;
+    }
+    for (const p of paths) addProjectEntry(p, undefined);
+  });
+}
+
+/** No app desktop (Tauri) a janela nativa avisa o drag-and-drop com o
+ *  caminho de verdade — ligado sob demanda em wireTauriDragDrop() (chamado
+ *  la embaixo, so quando o runtime do Tauri esta presente). */
+async function wireTauriDragDrop() {
+  const tauri = window.__TAURI__;
+  if (!tauri?.window) return;
+  try {
+    const win = tauri.window.getCurrentWindow();
+    await win.onDragDropEvent((event) => {
+      if (event.payload.type !== "drop") return;
+      for (const p of event.payload.paths || []) addProjectEntry(p, undefined);
+    });
+  } catch { /* versao do Tauri sem esse evento: so o botao "Adicionar" mesmo */ }
+}
+wireTauriDragDrop();
+
+// ---------------------------------------------------------------------------
 // Abas de arquivo
 // ---------------------------------------------------------------------------
 
-function newTab(path) {
+function newTab(root, path) {
   return {
     id: "t" + Date.now() + Math.random().toString(36).slice(2, 6),
+    // Cada aba lembra a propria raiz: com arquivos do projeto adicionados de
+    // qualquer lugar do disco, nao existe mais uma unica raiz global valendo
+    // pra tudo (so a pasta carregada em #rootInput tem esse papel hoje).
+    root,
     path,
     lines: [],
     mode: "range",
@@ -452,10 +770,10 @@ function newTab(path) {
   };
 }
 
-function openFile(path, jumpLine) {
-  let tab = state.tabs.find((t) => t.path === path);
+function openFile(root, path, jumpLine) {
+  let tab = state.tabs.find((t) => t.root === root && t.path === path);
   if (!tab) {
-    tab = newTab(path);
+    tab = newTab(root, path);
     state.tabs.push(tab);
     // O arquivo recem-aberto assume o painel em foco.
     state.panes[state.focusedPane] = tab.id;
@@ -590,7 +908,7 @@ function syncPanesToTime(sourceTab, line) {
 async function loadFileContent(tab, { tail = false, offset = 0, limit = null, scrollToLine = null } = {}) {
   const effectiveLimit = limit || tab.limit;
   const params = new URLSearchParams({
-    root: state.root,
+    root: tab.root || state.root,
     file: tab.path,
     limit: effectiveLimit,
   });
@@ -1482,7 +1800,7 @@ const MAX_SECTIONS = 12;
  *  nenhum, viram `raw` e valem para a linha inteira — unico jeito de alcancar
  *  as linhas que nem sao logcat. */
 function fileSearchParams(tab, query) {
-  const params = new URLSearchParams({ root: state.root, file: tab.path });
+  const params = new URLSearchParams({ root: tab.root || state.root, file: tab.path });
   const { fields, keywords } = parseQuery(query, tab);
   const byField = { tag: [], msg: [], pid: [], tid: [], uid: [], level: [] };
   let negated = 0;
@@ -1533,10 +1851,16 @@ function focusSearchBox(scope) {
 
 /** Busca com escopo em varios arquivos, reaproveitando /api/search. */
 async function searchAcrossFiles(tab, query, scope) {
-  const params = new URLSearchParams({ root: state.root, pattern: query });
+  const root = tab.root || state.root;
+  const params = new URLSearchParams({ root, pattern: query });
   if (scope === "open") {
     params.set("scope", "open");
-    params.set("open_files", state.tabs.map((t) => t.path).join(","));
+    // So as abas da MESMA raiz: o backend resolve caminho relativo a uma
+    // raiz so, e com arquivos do projeto de qualquer lugar do disco as abas
+    // podem pertencer a raizes diferentes.
+    params.set("open_files", state.tabs
+      .filter((t) => (t.root || state.root) === root)
+      .map((t) => t.path).join(","));
   } else {
     params.set("scope", "folder");
     params.set("max_files", 300);
@@ -1629,7 +1953,7 @@ async function runSearch(tab, query, { sectionId = null, offset = 0, groups = nu
     if (scope === "current") {
       let params, hasCriteria = true, unresolved = null;
       if (section.groups) {
-        params = new URLSearchParams({ root: state.root, file: tab.path });
+        params = new URLSearchParams({ root: tab.root || state.root, file: tab.path });
         params.set("groups", JSON.stringify(section.groups));
       } else {
         ({ params, hasCriteria, unresolved } = fileSearchParams(tab, query));
@@ -2010,8 +2334,8 @@ function openAtLine(tab, line, file) {
       findHeight: tab.findHeight, liveFilter: tab.liveFilter,
       colorCursor: tab.colorCursor,
     };
-    openFile(file, line);
-    const opened = state.tabs.find((t) => t.path === file);
+    openFile(tab.root, file, line);
+    const opened = state.tabs.find((t) => t.root === tab.root && t.path === file);
     if (opened) {
       Object.assign(opened, carry);
       opened.filterTerms = activeTerms(opened);
@@ -2041,7 +2365,7 @@ async function exportChecked(tab) {
     if (section.scope === "current" && section.results.matched > lines.length) {
       let params;
       if (section.groups) {
-        params = new URLSearchParams({ root: state.root, file: tab.path });
+        params = new URLSearchParams({ root: tab.root || state.root, file: tab.path });
         params.set("groups", JSON.stringify(section.groups));
       } else {
         ({ params } = fileSearchParams(tab, section.query));
@@ -2525,19 +2849,32 @@ const deviceInfoEl = el("#deviceInfo");
 let deviceReport = null;
 
 function scopeParams(scope) {
-  const params = new URLSearchParams({ root: state.root });
   if (scope === "current") {
     const tab = activeTab();
     if (!tab) return null;
+    const params = new URLSearchParams({ root: tab.root || state.root });
     params.set("scope", "explicit");
     params.set("files", tab.path);
-  } else if (scope === "open") {
-    if (!state.tabs.length) return null;
-    params.set("scope", "open");
-    params.set("open_files", state.tabs.map((t) => t.path).join(","));
-  } else {
-    params.set("scope", "folder");
+    return params;
   }
+  if (scope === "open") {
+    const tab = activeTab();
+    if (!tab || !state.tabs.length) return null;
+    const root = tab.root || state.root;
+    const params = new URLSearchParams({ root });
+    params.set("scope", "open");
+    // So as abas da mesma raiz da aba ativa: /api/device_info resolve
+    // caminho relativo a uma raiz so.
+    params.set("open_files", state.tabs
+      .filter((t) => (t.root || state.root) === root)
+      .map((t) => t.path).join(","));
+    return params;
+  }
+  // "folder" sempre varre a pasta raiz principal (#rootInput), nao os
+  // arquivos do projeto adicionados de fora dela.
+  if (!state.root) return null;
+  const params = new URLSearchParams({ root: state.root });
+  params.set("scope", "folder");
   return params;
 }
 
@@ -2553,14 +2890,16 @@ el("#deviceCopyBtn").addEventListener("click", () => {
 el("#deviceSearch").addEventListener("input", () => renderDeviceInfo());
 
 async function scanDevice() {
-  if (!state.root) {
-    deviceInfoEl.innerHTML = '<p class="side-hint">Carregue uma pasta primeiro.</p>';
+  if (!state.root && !state.tabs.length) {
+    deviceInfoEl.innerHTML = '<p class="side-hint">Carregue uma pasta ou abra um arquivo primeiro.</p>';
     return;
   }
   const scope = el("#deviceScope").value;
   const params = scopeParams(scope);
   if (!params) {
-    deviceInfoEl.innerHTML = '<p class="side-hint">Abra um arquivo de log primeiro.</p>';
+    deviceInfoEl.innerHTML = scope === "folder"
+      ? '<p class="side-hint">Carregue uma pasta primeiro (a varredura por pasta so olha a raiz principal).</p>'
+      : '<p class="side-hint">Abra um arquivo de log primeiro.</p>';
     return;
   }
   const btn = el("#deviceScanBtn");
@@ -2901,7 +3240,7 @@ async function abrirAoVivo(live) {
   await loadRoot();
   // Sem trocar de aba: os controles de pausar e parar ficam nesta, e escondê-los
   // logo depois de iniciar a coleta deixaria o usuario sem como interromper.
-  openFile(live.file.split("/").pop());
+  openFile(state.root, live.file.split("/").pop());
   const tab = activeTab();
   if (tab) {
     // Numa coleta ao vivo o que interessa e a linha que acabou de chegar.
@@ -3427,7 +3766,7 @@ async function loadTimeline(tab) {
   tab.timelineLoading = true;
   refreshPanel(tab);
   try {
-    const params = new URLSearchParams({ root: state.root, file: tab.path, buckets: 600 });
+    const params = new URLSearchParams({ root: tab.root || state.root, file: tab.path, buckets: 600 });
     const res = await fetch(`/api/timeline?${params}`);
     const data = await res.json();
     if (!res.ok) {
@@ -3549,7 +3888,7 @@ async function loadProcessMap(tab) {
   if (tab.procMap || tab.procLoading) return;
   tab.procLoading = true;
   try {
-    const params = new URLSearchParams({ root: state.root, file: tab.path });
+    const params = new URLSearchParams({ root: tab.root || state.root, file: tab.path });
     const res = await fetch(`/api/process_map?${params}`);
     const data = await res.json();
     if (!res.ok) return;
@@ -3755,12 +4094,15 @@ function exportSession() {
     syncTime: state.syncTime,
     savedFilters: state.savedFilters,
     highlights: state.highlights,
-    // panes guarda o caminho, nao o id: os ids sao recriados ao abrir.
+    // panes guarda raiz+caminho, nao o id: os ids sao recriados ao abrir. A
+    // raiz entra na chave porque dois arquivos do projeto de pastas
+    // diferentes podem ter o mesmo caminho relativo.
     panes: state.panes.slice(0, state.paneCount).map((id) => {
       const t = state.tabs.find((x) => x.id === id);
-      return t ? t.path : null;
+      return t ? { root: t.root, path: t.path } : null;
     }),
     tabs: state.tabs.map((t) => ({
+      root: t.root,
       path: t.path,
       offset: t.offset,
       limit: t.limit,
@@ -3813,8 +4155,9 @@ async function importSession(file) {
   state.tabs = [];
   state.panes = [null, null, null];
   const byPath = new Map();
+  const paneKey = (root, path) => `${root || ""}::${path}`;
   for (const saved of session.tabs) {
-    const tab = newTab(saved.path);
+    const tab = newTab(saved.root || session.root || state.root, saved.path);
     tab.limit = saved.limit || DEFAULT_PAGE_SIZE;
     tab.wrapText = !!saved.wrapText;
     tab.liveFilter = saved.liveFilter || "";
@@ -3829,10 +4172,14 @@ async function importSession(file) {
       for (const v of values || []) tab[key].add(v);
     }
     state.tabs.push(tab);
-    byPath.set(saved.path, tab);
+    byPath.set(paneKey(tab.root, saved.path), tab);
   }
-  (session.panes || []).forEach((path, i) => {
-    const tab = path && byPath.get(path);
+  (session.panes || []).forEach((entry, i) => {
+    if (!entry) return;
+    // Sessoes antigas (v1 sem multi-raiz) guardavam so a string do caminho.
+    const root = typeof entry === "string" ? (session.root || state.root) : entry.root;
+    const path = typeof entry === "string" ? entry : entry.path;
+    const tab = byPath.get(paneKey(root, path));
     if (tab) state.panes[i] = tab.id;
   });
   state.activeTab = state.tabs.length ? (state.panes[0] || state.tabs[0].id) : null;
