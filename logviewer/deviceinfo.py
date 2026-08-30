@@ -65,8 +65,10 @@ PROP_MAP = {
     "ro.boot.serialno": ("identificacao", "Numero de serie (boot)"),
     "ro.product.first_api_level": ("identificacao", "API de lancamento"),
     "ro.csc.sales_code": ("identificacao", "Sales code (CSC)"),
+    "ro.boot.sales_code": ("identificacao", "Sales code (boot)"),
     "ro.boot.hardware.sku": ("identificacao", "SKU"),
     "ril.serialnumber": ("identificacao", "Serial (RIL)"),
+    "ro.boot.activatedid": ("identificacao", "Activated ID"),
 
     # Build / ROM
     "ro.build.fingerprint": ("build", "Fingerprint"),
@@ -181,6 +183,19 @@ PROP_MAP = {
     "sys.oem_unlock_allowed": ("seguranca", "Desbloqueio OEM permitido"),
 }
 
+# Getprop de fabricantes variam bastante (ex: a chave exata do sales code ou
+# do activated id muda entre versoes/vendors). Para nao depender de listar
+# cada variante em PROP_MAP, qualquer propriedade nao mapeada cujo nome bata
+# com uma destas pistas ainda entra na categoria "identificacao", com o
+# proprio nome da chave como rotulo.
+_IDENTITY_PROP_HINTS = ("imei", "activatedid", "sales_code", "salescode", "serialno", "serial_no")
+
+
+def _looks_like_identity_prop(key):
+    lowered = key.lower()
+    return any(hint in lowered for hint in _IDENTITY_PROP_HINTS)
+
+
 # ---------------------------------------------------------------------------
 # Linhas soltas (cabecalho de bugreport, /proc, dumpsys)
 # ---------------------------------------------------------------------------
@@ -260,6 +275,9 @@ LINE_RULES = (
     _rule("telefonia", "Estado do servico", r"^\s*mServiceState=(.+)$"),
     _rule("telefonia", "Tipo de rede de dados", r"\bdataNetworkType[=:\s]+(\w+)"),
     _rule("telefonia", "Intensidade do sinal", r"\bmSignalStrength=([^,\]]+)"),
+    # dumpsys iphonesubinfo / telephony registry - varia por versao do Android.
+    _rule("telefonia", "IMEI", r"^\s*Device ID(?:\s*\(slot \d+\))?\s*[:=]\s*(\d{14,17})\s*$"),
+    _rule("telefonia", "IMEI", r"\bimei(?:\[\d+\])?\s*[:=]\s*(\d{14,17})\b", re.IGNORECASE),
 )
 
 # Alguns valores so fazem sentido uma vez (o primeiro visto); outros valem a
@@ -414,6 +432,8 @@ def analyze_file(path, encoding, max_lines=DEFAULT_MAX_LINES, log_format=None):
                     mapped = PROP_MAP.get(key)
                     if mapped:
                         collector.add(mapped[0], mapped[1], value, "getprop")
+                    elif _looks_like_identity_prop(key):
+                        collector.add("identificacao", key, value, "getprop")
                     continue
 
             if first == "-":
@@ -427,9 +447,13 @@ def analyze_file(path, encoding, max_lines=DEFAULT_MAX_LINES, log_format=None):
             if "=" in stripped and first.islower():
                 m = _PROP_EQ_RE.match(stripped)
                 if m:
-                    mapped = PROP_MAP.get(m.group(1))
+                    key = m.group(1)
+                    mapped = PROP_MAP.get(key)
                     if mapped:
                         collector.add(mapped[0], mapped[1], m.group(2), "build.prop")
+                        continue
+                    if _looks_like_identity_prop(key):
+                        collector.add("identificacao", key, m.group(2), "build.prop")
                         continue
 
             if "Package [" in stripped:
