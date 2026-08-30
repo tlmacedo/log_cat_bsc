@@ -775,22 +775,29 @@ function newTab(root, path) {
 
 function openFile(root, path, jumpLine) {
   let tab = state.tabs.find((t) => t.root === root && t.path === path);
-  if (!tab) {
+  const isNew = !tab;
+  if (isNew) {
     tab = newTab(root, path);
     state.tabs.push(tab);
-    // O arquivo recem-aberto assume o painel em foco.
-    state.panes[state.focusedPane] = tab.id;
-    state.activeTab = tab.id;
-    renderTabs();
-    if (jumpLine) {
-      jumpToLine(tab, jumpLine);
-    } else {
-      loadFileContent(tab, { offset: 0 });
-    }
-    return;
   }
+  // Se a aba ja estiver visivel em algum painel (varios paineis abertos ao
+  // mesmo tempo), so muda o foco pra ele — jogar ela sempre no painel que
+  // estava em foco duplicaria a aba em dois paineis e apagaria o que esse
+  // painel tinha antes. Isso tambem cobre o clique numa linha de resultado
+  // de busca em varios arquivos: sempre cai na aba certa daquele arquivo,
+  // nunca fica na aba que estava aberta antes.
+  const paneIndex = state.panes.slice(0, state.paneCount).indexOf(tab.id);
+  if (paneIndex >= 0) state.focusedPane = paneIndex;
+  state.panes[state.focusedPane] = tab.id;
+  state.activeTab = tab.id;
+  // Painel visivel ANTES de carregar/pular: o salto pra linha procura a
+  // tabela desta aba no DOM, que so existe depois deste render.
+  renderTabs();
+  renderPanels();
+  renderFilterList();
+  renderDeviceInfo();
   if (jumpLine) jumpToLine(tab, jumpLine);
-  setActiveTab(tab.id);
+  else if (isNew) loadFileContent(tab, { offset: 0 });
 }
 
 function closeTab(id, evt) {
@@ -1622,9 +1629,13 @@ function buildPanel(tab, paneIndex) {
         `${escapeHtml(t.path.split("/").pop())}</option>`).join("") +
       `</select>`
     : "";
+  // Enquanto uma busca desta aba esta em andamento, o campo e o botao
+  // avisam visualmente (cursor de espera + spinner) — sem isso, um filtro
+  // pesado parecia travado.
+  const searching = tab.findSections.some((s) => s.loading);
   toolbar.innerHTML = `
     ${paneSelect}
-    <input class="live-filter" list="filterHistoryList" value="${escapeHtml(tab.liveFilter)}"
+    <input class="live-filter${searching ? " is-loading" : ""}" list="filterHistoryList" value="${escapeHtml(tab.liveFilter)}"
       placeholder="Buscar no arquivo todo (Enter). Ex: sales_code|imei|serialno"
       title="Enter busca no ARQUIVO INTEIRO e abre a janela de resultados.&#10;&#10;created for   = a frase inteira, com o espaco&#10;created|for   = uma ou outra&#10;created&amp;for   = as duas na mesma linha&#10;&#10;tag:X pid:Y   = filtra o campo (na busca comum o campo casa por conter)&#10;                e as palavras vao no texto da mensagem&#10;Prefixos: tag: pid: tid: uid: app: level:&#10;&#10;tag:A|tag:B|C = varias flags e palavras soltas juntas, sem espaco:&#10;                TAG exata A, OU TAG exata B, OU a palavra C na linha&#10;                (| = ou, &amp; = e — mesmo mecanismo do filtro salvo&#10;                com varios nos, so que numa linha so)&#10;Cada palavra ganha sua cor. Aceita regex.">
     <select data-act="scope" title="Onde procurar">
@@ -1632,7 +1643,7 @@ function buildPanel(tab, paneIndex) {
       <option value="open"${tab.findScope === "open" ? " selected" : ""}>arquivos abertos</option>
       <option value="folder"${tab.findScope === "folder" ? " selected" : ""}>pasta inteira</option>
     </select>
-    <button data-act="filesearch" class="primary" title="Buscar (Enter)">Buscar</button>
+    <button data-act="filesearch" class="primary${searching ? " is-loading" : ""}" title="Buscar (Enter)">${searching ? '<span class="btn-spinner"></span>Buscando' : "Buscar"}</button>
     <div class="level-toggles">
       ${LEVELS.map((l) => `<button class="level-toggle${tab.levels.has(l) ? " on" : ""}" data-level="${l}" title="Marcar as linhas de nivel ${l} com a cor do nivel">${l}</button>`).join("")}
     </div>
@@ -2187,20 +2198,30 @@ function buildSection(tab, section) {
     ? `${fmtNum(r.offset + 1)}-${fmtNum(r.offset + r.lines.length)} de ${fmtNum(r.matched)}`
     : "";
 
+  const countHtml = section.loading
+    ? `<span class="fd-count fd-loading"><span class="spin-ring"></span>Buscando...</span>`
+    : `<span class="fd-count${section.error ? " fd-err" : ""}">${escapeHtml(count)}</span>`;
+
   box.innerHTML =
     `<header class="fd-sec-head">` +
-      `<button class="fd-toggle" title="Colapsar/expandir">${section.collapsed ? "▸" : "▾"}</button>` +
-      `<span class="fd-chips">${chipsHtml(section, tab)}</span>` +
-      `<span class="fd-origin" title="${escapeHtml(origem + aparelho)}">` +
-        `${escapeHtml(origem)}${escapeHtml(aparelho)}</span>` +
-      `<span class="fd-count${section.error ? " fd-err" : ""}">${escapeHtml(count)}</span>` +
-      `${pagina ? `<span class="fd-pagina">${pagina}</span>` : ""}` +
-      `<span class="fd-spacer"></span>` +
-      `<label class="fd-check" title="Marcar esta secao para exportar">` +
-        `<input type="checkbox" class="fd-export"${section.exportChecked ? " checked" : ""}> exportar</label>` +
-      `<button class="fd-page" data-dir="-1" ${!r || r.files || r.offset === 0 ? "disabled" : ""} title="Pagina anterior">&#8592;</button>` +
-      `<button class="fd-page" data-dir="1" ${!r || r.files || !r.hasMore ? "disabled" : ""} title="Proxima pagina">&#8594;</button>` +
-      `<button class="fd-close icon-btn" title="Remover esta busca">&times;</button>` +
+      `<div class="fd-sec-row1">` +
+        `<button class="fd-toggle" title="Colapsar/expandir">${section.collapsed ? "▸" : "▾"}</button>` +
+        `<span class="fd-chips">${chipsHtml(section, tab)}</span>` +
+        // Nome do arquivo por extenso: aqui do lado dos chips ele quebra
+        // linha em vez de ser cortado com reticencias.
+        `<span class="fd-origin" title="${escapeHtml(origem + aparelho)}">` +
+          `${escapeHtml(origem)}${escapeHtml(aparelho)}</span>` +
+      `</div>` +
+      `<div class="fd-sec-row2">` +
+        countHtml +
+        `${pagina ? `<span class="fd-pagina">${pagina}</span>` : ""}` +
+        `<span class="fd-spacer"></span>` +
+        `<label class="fd-check" title="Marcar esta secao para exportar">` +
+          `<input type="checkbox" class="fd-export"${section.exportChecked ? " checked" : ""}> exportar</label>` +
+        `<button class="fd-page" data-dir="-1" ${!r || r.files || r.offset === 0 ? "disabled" : ""} title="Pagina anterior">&#8592;</button>` +
+        `<button class="fd-page" data-dir="1" ${!r || r.files || !r.hasMore ? "disabled" : ""} title="Proxima pagina">&#8594;</button>` +
+        `<button class="fd-close icon-btn" title="Remover esta busca">&times;</button>` +
+      `</div>` +
     `</header>` +
     `<div class="fd-list"></div>`;
 
@@ -2217,6 +2238,16 @@ function buildSection(tab, section) {
   } else if (r) {
     list.innerHTML = '<div class="fd-empty">Nenhuma linha encontrada.</div>';
   }
+
+  // O cabecalho agora pode quebrar em duas linhas quando o filtro tem muitos
+  // termos (chips), entao a altura dele nao e mais fixa. O cabecalho da
+  // tabela logo abaixo tambem e sticky e precisa saber onde a segunda linha
+  // termina — --sec-head-h e escopada a esta secao pra isso.
+  const head = box.querySelector(".fd-sec-head");
+  const roHead = new ResizeObserver(() => {
+    box.style.setProperty("--sec-head-h", head.offsetHeight + "px");
+  });
+  roHead.observe(head);
 
   box.querySelector(".fd-toggle").addEventListener("click", () => {
     section.collapsed = !section.collapsed;
@@ -2269,14 +2300,18 @@ function buildMarkedSection(tab) {
 
   box.innerHTML =
     `<header class="fd-sec-head">` +
-      `<button class="fd-toggle" title="Colapsar/expandir">${tab.markedCollapsed ? "▸" : "▾"}</button>` +
-      `<span class="fd-chips"><span class="fd-term fd-term-plain">✓ marcadas para exportar</span>` +
-      `<span class="fd-term fd-term-plain">⚑ bookmarks</span></span>` +
-      `<span class="fd-count">${fmtNum(rows.length)} linha(s)</span>` +
-      `<span class="fd-spacer"></span>` +
-      `<label class="fd-check" title="Marcar esta secao para exportar">` +
-        `<input type="checkbox" class="fd-export"${tab.markedExport ? " checked" : ""}> exportar</label>` +
-      `<button class="fd-clear" title="Limpar as marcacoes">Limpar</button>` +
+      `<div class="fd-sec-row1">` +
+        `<button class="fd-toggle" title="Colapsar/expandir">${tab.markedCollapsed ? "▸" : "▾"}</button>` +
+        `<span class="fd-chips"><span class="fd-term fd-term-plain">✓ marcadas para exportar</span>` +
+        `<span class="fd-term fd-term-plain">⚑ bookmarks</span></span>` +
+      `</div>` +
+      `<div class="fd-sec-row2">` +
+        `<span class="fd-count">${fmtNum(rows.length)} linha(s)</span>` +
+        `<span class="fd-spacer"></span>` +
+        `<label class="fd-check" title="Marcar esta secao para exportar">` +
+          `<input type="checkbox" class="fd-export"${tab.markedExport ? " checked" : ""}> exportar</label>` +
+        `<button class="fd-clear" title="Limpar as marcacoes">Limpar</button>` +
+      `</div>` +
     `</header>` +
     `<div class="fd-list"></div>`;
 
@@ -2297,6 +2332,12 @@ function buildMarkedSection(tab) {
     list.innerHTML = '<div class="fd-empty">Nenhuma linha marcada. Use o menu de ' +
       'contexto do log: "Marcar para exportar" ou "Marcar/desmarcar (bookmark)".</div>';
   }
+
+  const markedHead = box.querySelector(".fd-sec-head");
+  const roMarkedHead = new ResizeObserver(() => {
+    box.style.setProperty("--sec-head-h", markedHead.offsetHeight + "px");
+  });
+  roMarkedHead.observe(markedHead);
 
   box.querySelector(".fd-toggle").addEventListener("click", () => {
     tab.markedCollapsed = !tab.markedCollapsed;
