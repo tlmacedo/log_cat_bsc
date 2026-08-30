@@ -4,6 +4,7 @@
    luminosas no tema escuro para manter o contraste.
    --------------------------------------------------------------------------- */
 :root {
+  --sec-head-h: 26px;
   --bg: #f0f0f0;
   --bg-panel: #ffffff;
   --bg-alt: #f7f7f7;
@@ -216,6 +217,10 @@ button.on-toggle { background: var(--accent); color: var(--accent-fg); border-co
 .dev-item .k { color: var(--fg-dim); font-size: 10.5px; text-transform: uppercase; letter-spacing: .02em; }
 .dev-item .v { font-family: var(--mono); font-size: 11.5px; word-break: break-word; user-select: text; }
 .dev-empty { padding: 10px; color: var(--fg-dim); }
+/* Associacao clicavel: leva direto a busca daquele PID ou TAG. */
+.dev-item.assoc { cursor: pointer; }
+.dev-item.assoc:hover { background: var(--bg-hover); }
+.assoc-warn { color: var(--lvl-W); font-style: normal; font-size: 9.5px; }
 
 /* ---- Aba Filtros salvos ---- */
 .filter-list { list-style: none; margin: 0; padding: 4px 6px; overflow: auto; flex: 1; }
@@ -438,7 +443,6 @@ button.on-toggle { background: var(--accent); color: var(--accent-fg); border-co
   font-size: 11px;
   font-weight: 600;
   white-space: nowrap;
-  position: relative;
 }
 /* Alca de redimensionamento na borda direita do cabecalho. */
 .col-resize {
@@ -745,9 +749,15 @@ mark.hl-7, .hl-chip.hl-7, .hl-swatch.hl-7, .fd-term.hl-7 { background: #fcc2d7; 
   font-size: 11.5px;
   position: sticky;
   top: 0;
-  z-index: 1;
-  flex-wrap: wrap;
+  z-index: 4;
+  /* Altura fixa: a linha de cabecalho da tabela gruda logo abaixo dela, e uma
+     altura variavel faria as duas se sobreporem. */
+  height: var(--sec-head-h);
+  flex-wrap: nowrap;
+  overflow: hidden;
 }
+.fd-chips { overflow-x: auto; scrollbar-width: none; }
+.fd-chips::-webkit-scrollbar { display: none; }
 .fd-marked > .fd-sec-head { background: color-mix(in srgb, var(--accent) 12%, var(--bg-alt)); }
 .fd-toggle {
   border: none;
@@ -756,7 +766,7 @@ mark.hl-7, .hl-chip.hl-7, .hl-swatch.hl-7, .fd-term.hl-7 { background: #fcc2d7; 
   padding: 0 2px;
   font-size: 12px;
 }
-.fd-chips { display: flex; gap: 4px; flex-wrap: wrap; }
+.fd-chips { display: flex; gap: 4px; flex-wrap: nowrap; }
 .fd-term {
   padding: 0 6px;
   border-radius: 3px;
@@ -787,12 +797,15 @@ mark.hl-7, .hl-chip.hl-7, .hl-swatch.hl-7, .fd-term.hl-7 { background: #fcc2d7; 
 /* O texto dos resultados e selecionavel com o mouse, inclusive atravessando
    varias linhas, para copiar e colar. O numero da linha fica de fora para nao
    sujar o que foi copiado. */
-.fd-list { font-family: var(--mono); font-size: 11.5px; user-select: text; overflow-x: auto; }
+/* Sem overflow proprio: quem rola e .fd-sections, e e a ele que os cabecalhos
+   grudam. Um scroll aqui criaria um segundo contexto e o sticky prenderia a
+   thead a uma caixa que sai de vista. */
+.fd-list { font-family: var(--mono); font-size: 11.5px; user-select: text; }
 /* Os resultados usam a mesma tabela do log: mesmo cabecalho e mesmas larguras
    de coluna. Nada de display:flex aqui — numa <tr> isso desmancha as colunas e
    o cabecalho deixa de bater com o corpo. */
 .fd-table { font-size: 11.5px; }
-.fd-table thead th { top: 0; }
+.fd-table thead th { top: var(--sec-head-h); z-index: 3; }
 /* O cursor de texto sinaliza que o clique simples serve para selecionar; a
    navegacao e no duplo clique. */
 tr.fd-row { cursor: text; }

@@ -348,8 +348,9 @@ function setActiveTab(id) {
   state.panes[state.focusedPane] = id;
   renderTabs();
   renderPanels();
-  // Os filtros ativos sao por aba; a lista precisa refletir a aba atual.
+  // Filtros ativos e associacoes sao por aba; ambos refletem a aba atual.
   renderFilterList();
+  renderDeviceInfo();
 }
 
 function activeTab() {
@@ -2222,10 +2223,85 @@ async function scanDevice() {
   }
 }
 
+/** Tudo que o app conseguiu associar a um codigo do log: PID e UID viram nome
+ *  de processo, TAG vira o servico do sistema. Sao as mesmas associacoes que
+ *  aparecem na dica de cada celula, reunidas num lugar so para consulta. */
+function associationsHtml(tab, q) {
+  if (!tab) return "";
+  const parts = [];
+  const hit = (a, b) => !q || String(a).toLowerCase().includes(q) ||
+    String(b).toLowerCase().includes(q);
+
+  const pids = Object.entries(tab.procMap || {})
+    .filter(([pid, name]) => hit(pid, name))
+    .sort((a, b) => Number(a[0]) - Number(b[0]));
+  if (pids.length) {
+    parts.push(
+      `<details class="dev-cat" ${q ? "open" : ""}>` +
+      `<summary>\u{1F5C2} PID &rarr; processo<span class="count">${pids.length}</span></summary>` +
+      pids.map(([pid, name]) => {
+        const uid = (tab.procUids || {})[pid];
+        const dup = tab.procAmbiguous && tab.procAmbiguous.has(pid);
+        return `<div class="dev-item assoc" data-pid="${escapeHtml(pid)}" ` +
+          `title="Clique para buscar as linhas deste PID${dup ? " (PID reutilizado na captura)" : ""}">` +
+          `<span class="k">PID ${escapeHtml(pid)}${uid ? " &middot; uid " + escapeHtml(uid) : ""}` +
+          `${dup ? ' <em class="assoc-warn">reutilizado</em>' : ""}</span>` +
+          `<span class="v">${escapeHtml(name)}</span></div>`;
+      }).join("") + `</details>`);
+  }
+
+  // TAGs que o glossario reconhece como servico do sistema.
+  if (glossaryData) {
+    const tags = Object.entries(glossaryData.tag_index)
+      .map(([tag, sigla]) => [tag, sigla, glossaryEntry(sigla)])
+      .filter(([tag, sigla, e]) => e && hit(tag, `${sigla} ${e.nome}`));
+    if (tags.length) {
+      parts.push(
+        `<details class="dev-cat" ${q ? "open" : ""}>` +
+        `<summary>\u{1F3F7} TAG &rarr; servico<span class="count">${tags.length}</span></summary>` +
+        tags.map(([tag, sigla, e]) =>
+          `<div class="dev-item assoc" data-tag="${escapeHtml(tag)}" ` +
+          `title="${escapeHtml(e.desc)}">` +
+          `<span class="k">${escapeHtml(tag)}</span>` +
+          `<span class="v">${escapeHtml(sigla)} &middot; ${escapeHtml(e.nome)}</span></div>`).join("") +
+        `</details>`);
+    }
+  }
+  return parts.join("");
+}
+
+/** Clicar numa associacao dispara a busca correspondente. */
+function wireAssociations(tab) {
+  deviceInfoEl.querySelectorAll(".dev-item.assoc").forEach((node) => {
+    node.addEventListener("click", () => {
+      if (!tab) return;
+      const query = node.dataset.pid ? `pid:${node.dataset.pid}` : `tag:${node.dataset.tag}`;
+      tab.liveFilter = query;
+      runSearch(tab, query);
+    });
+  });
+}
+
 function renderDeviceInfo() {
-  if (!deviceReport) return;
+  const tab = activeTab();
   const q = el("#deviceSearch").value.trim().toLowerCase();
   const parts = [];
+  const assoc = associationsHtml(tab, q);
+  if (assoc) parts.push(assoc);
+
+  if (!deviceReport) {
+    // As associacoes vem do mapa de processos, que carrega sozinho ao abrir o
+    // arquivo; nao dependem da analise completa do aparelho.
+    deviceInfoEl.innerHTML = parts.length
+      ? parts.join("") +
+        '<p class="side-hint">Clique em <strong>Analisar</strong> para extrair ' +
+        'modelo, build, kernel, CPU, memoria, bateria e o resto.</p>'
+      : '<p class="side-hint">Abra um arquivo de log e clique em <strong>Analisar</strong> ' +
+        'para extrair modelo, build, kernel, CPU, memoria, bateria, telefonia e ' +
+        'demais dados do aparelho.</p>';
+    wireAssociations(tab);
+    return;
+  }
 
   for (const cat of deviceReport.categories) {
     const items = q
@@ -2276,6 +2352,8 @@ function renderDeviceInfo() {
   deviceInfoEl.innerHTML = parts.length
     ? parts.join("")
     : '<p class="dev-empty">Nada encontrado para esse filtro.</p>';
+
+  wireAssociations(activeTab());
 
   // Clicar numa TAG frequente aplica o filtro na aba ativa.
   deviceInfoEl.querySelectorAll(".dev-item[data-tag]").forEach((node) => {
@@ -2829,6 +2907,7 @@ async function loadProcessMap(tab) {
     if (data.count) {
       setStatus(`${data.count} PID(s) vinculados ao nome do processo.`);
       refreshPanel(tab);
+      renderDeviceInfo();   // a lista de associacoes ja pode ser consultada
     }
   } catch { /* o nome do processo e um extra; sem ele a coluna PID segue util */ }
   finally { tab.procLoading = false; }
