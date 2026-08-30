@@ -566,22 +566,28 @@ function resolvePid(tab, value) {
   return { pattern: `^(?:${pids.join("|")})$`, pids, byName: true };
 }
 
-/** Quebra o valor de um termo na gramatica do app:
- *    "a&b"  -> a linha precisa ter as duas (E)
- *    "a|b"  -> basta uma das duas (OU)
- *    "a&b|c"-> precisa de `a` e de (`b` ou `c`)
- *  O `&` nao existe em regex, entao vira lookahead; o `|` e o do proprio regex.
- *  Padroes com barra invertida ficam intactos: ali o autor sabe o que quer. */
+/** Quebra uma expressao de palavras-chave na gramatica do app:
+ *
+ *    created for   -> a frase inteira, com o espaco (uma coisa so)
+ *    created|for   -> uma ou outra
+ *    created&for   -> as duas, em qualquer lugar da mesma linha
+ *    a&b|c         -> `a` e mais (`b` ou `c`)
+ *
+ *  Espaco nunca separa termos: faz parte da palavra procurada. Padroes com
+ *  barra invertida ficam intactos — ali o autor escreveu regex de proposito. */
 function splitAndOr(value) {
   if (value.includes("\\") || !value.includes("&")) {
-    return { groups: [value], words: value.split("|").filter(Boolean) };
+    return { groups: [value], words: value.split("|").map((w) => w.trim()).filter(Boolean) };
   }
-  const groups = value.split("&").filter(Boolean);
-  return { groups, words: groups.flatMap((g) => g.split("|")).filter(Boolean) };
+  const groups = value.split("&").map((g) => g.trim()).filter(Boolean);
+  return {
+    groups,
+    words: groups.flatMap((g) => g.split("|")).map((w) => w.trim()).filter(Boolean),
+  };
 }
 
-/** Regex unica equivalente ao termo, para o casamento no cliente (uma linha de
- *  cada vez, entao o lookahead aqui e barato). No servidor os grupos de E vao
+/** Regex unica equivalente a expressao, para o casamento no cliente (uma linha
+ *  por vez, entao o lookahead aqui e barato). No servidor os grupos de E vao
  *  separados, porque la a varredura e por bloco e o lookahead custaria caro. */
 function termPattern(value) {
   const { groups } = splitAndOr(value);
@@ -589,15 +595,26 @@ function termPattern(value) {
   return groups.map((g) => `(?=.*(?:${g}))`).join("") + ".*";
 }
 
-function parseLiveFilter(query, caseSensitive, tab) {
-  const terms = [];
-  for (let raw of (query || "").trim().split(/\s+/)) {
-    if (!raw) continue;
+const FIELD_TOKEN = new RegExp(
+  "^-?(?:" + Object.keys(FIELD_PREFIXES).map((p) => p.slice(0, -1)).join("|") + "):",
+  "i");
+
+/** Separa a consulta em campos (tag:, pid:, ...) e a expressao de
+ *  palavras-chave.
+ *
+ *  Os campos sao tokens soltos, delimitados por espaco. Todo o resto volta
+ *  junto, com os espacos preservados, porque `created for` e uma frase e nao
+ *  dois termos. */
+function parseQuery(query, tab) {
+  const fields = [];
+  const rest = [];
+  for (const token of String(query || "").trim().split(/\s+/)) {
+    if (!token) continue;
+    if (!FIELD_TOKEN.test(token)) { rest.push(token); continue; }
+
+    let raw = token;
     let negate = false;
-    if (raw.startsWith("-") && raw.length > 1) {
-      negate = true;
-      raw = raw.slice(1);
-    }
+    if (raw.startsWith("-")) { negate = true; raw = raw.slice(1); }
     let field = null;
     let value = raw;
     for (const [prefix, name] of Object.entries(FIELD_PREFIXES)) {
@@ -611,20 +628,13 @@ function parseLiveFilter(query, caseSensitive, tab) {
 
     if (field === "pid" || field === "tid") {
       const r = resolvePid(tab, value);
-      terms.push({
-        field, negate, value,
-        re: safeRegex(r.pattern ?? "$^", caseSensitive),
-        pids: r.pids,
-        unresolved: r.byName && !r.pids.length,
-      });
-      continue;
+      fields.push({ field, negate, value, pattern: r.pattern, pids: r.pids,
+                    unresolved: r.byName && !r.pids.length });
+    } else {
+      fields.push({ field, negate, value, pattern: value });
     }
-    terms.push({
-      field, negate, value,
-      re: safeRegex(termPattern(value), caseSensitive),
-    });
   }
-  return terms;
+  return { fields, keywords: rest.join(" ") };
 }
 
 const MAX_ACTIVE_TERMS = 24;
@@ -635,39 +645,42 @@ const MAX_ACTIVE_TERMS = 24;
 function termsOf(query, start = 0, tab = null) {
   const out = [];
   let color = start;
-  for (const term of parseLiveFilter(query, false, tab)) {
-    if (term.negate) continue;   // termo negado nao pinta nada
-    // Para pid:/app: pinta o numero que foi resolvido, nao o texto digitado:
-    // "sbrows" nao aparece na linha, mas "10076" aparece.
-    if (term.pids && term.pids.length) {
-      for (const pid of term.pids.slice(0, 4)) {
+  const { fields, keywords } = parseQuery(query, tab);
+
+  for (const f of fields) {
+    if (f.negate) continue;   // termo negado nao pinta nada
+    // Para pid:/app: pinta o numero resolvido, nao o texto digitado:
+    // "sbrowser" nao aparece na linha, mas "10076" aparece.
+    if (f.pids && f.pids.length) {
+      for (const pid of f.pids.slice(0, 4)) {
         out.push({
-          pattern: `\\b${pid}\\b`, label: pid, color: color % HL_COLORS,
-          field: term.field,
-          // Quem buscou por nome precisa ver a que processo o numero pertence.
+          pattern: `\\b${pid}\\b`, label: pid, color: color % HL_COLORS, field: f.field,
           note: (tab && tab.procMap && tab.procMap[pid]) || null,
         });
         color++;
       }
       continue;
     }
+    out.push({ pattern: f.value, label: f.value, color: color % HL_COLORS, field: f.field });
+    color++;
+  }
+
+  if (keywords) {
     // Uma cor por palavra, tanto nas alternativas de "a|b" quanto nos termos
     // exigidos de "a&b". Com parenteses ou colchetes o "|" pode ser interno ao
-    // regex, entao o termo fica com uma cor so.
-    const parts = /[()[\]\\]/.test(term.value)
-      ? [term.value]
-      : splitAndOr(term.value).words;
+    // regex, entao a expressao fica com uma cor so.
+    const parts = /[()[\]\\]/.test(keywords) ? [keywords] : splitAndOr(keywords).words;
     for (const part of parts) {
-      out.push({ pattern: part, label: part, color: color % HL_COLORS, field: term.field });
+      out.push({ pattern: part, label: part, color: color % HL_COLORS });
       color++;
     }
   }
   return out;
 }
 
-/** Todas as palavras que devem aparecer coloridas no log: as que estao sendo
- *  digitadas mais as de cada secao de resultado ainda aberta. Assim a cor no
- *  log e a mesma da etiqueta na janela de baixo. */
+/** Todas as palavras que devem aparecer coloridas no log: as de cada secao de
+ *  resultado ainda aberta. Assim a cor no log e a mesma da etiqueta na janela
+ *  de baixo. */
 function activeTerms(tab) {
   const out = [];
   const seen = new Set();
@@ -678,22 +691,6 @@ function activeTerms(tab) {
   };
   for (const section of tab.findSections || []) section.terms.forEach(push);
   return out;
-}
-
-function termMatches(term, line) {
-  const c = line.c;
-  let subject;
-  if (!term.field) {
-    subject = line.text;
-  } else if (!c) {
-    // Linha que nao e logcat nao tem campos; um termo por campo nao casa.
-    subject = "";
-  } else if (term.field === "level") {
-    subject = c.level || "";
-  } else {
-    subject = c[term.field] || "";
-  }
-  return term.re.test(subject);
 }
 
 
@@ -1031,7 +1028,7 @@ function buildPanel(tab, paneIndex) {
     ${paneSelect}
     <input class="live-filter" list="filterHistoryList" value="${escapeHtml(tab.liveFilter)}"
       placeholder="Buscar no arquivo todo (Enter). Ex: sales_code|imei|serialno"
-      title="Enter busca no ARQUIVO INTEIRO e abre a janela de resultados.&#10;&#10;a|b|c  = qualquer uma das palavras (cada uma ganha uma cor)&#10;a b    = a linha precisa ter as duas&#10;-a     = esconde as linhas com 'a' (so na pagina)&#10;Prefixos: tag: pid: tid: app: text: level:&#10;Aceita regex.">
+      title="Enter busca no ARQUIVO INTEIRO e abre a janela de resultados.&#10;&#10;created for   = a frase inteira, com o espaco&#10;created|for   = uma ou outra&#10;created&amp;for   = as duas na mesma linha&#10;&#10;tag:X pid:Y   = filtra o campo (na busca comum o campo casa por conter)&#10;                e as palavras vao no texto da mensagem&#10;Prefixos: tag: pid: tid: uid: app: level:&#10;Cada palavra ganha sua cor. Aceita regex.">
     <select data-act="scope" title="Onde procurar">
       <option value="current"${(tab.findScope || "current") === "current" ? " selected" : ""}>neste arquivo</option>
       <option value="open"${tab.findScope === "open" ? " selected" : ""}>arquivos abertos</option>
@@ -1174,30 +1171,49 @@ const MAX_SECTIONS = 12;
 // Busca: cada pesquisa vira uma secao na janela de resultados
 // ---------------------------------------------------------------------------
 
-/** Monta os parametros de /api/filtered a partir de uma consulta. Termos sem
- *  prefixo viram `raw`: casam com a linha inteira, que e o que a maioria das
- *  linhas de um bugreport exige — elas nem sao logcat. */
+/** Monta os parametros de /api/filtered a partir de uma consulta da caixa de
+ *  busca.
+ *
+ *  Primeiro os campos (tag:, pid:, ...), depois as palavras-chave. Na busca
+ *  comum o campo casa por *conter* o valor — e uma consulta rapida, e digitar
+ *  tag:Telephony para varrer a familia toda e util. No filtro salvo o valor e
+ *  exato, porque ali o criterio foi escrito para ficar.
+ *
+ *  Havendo campo, as palavras vao para `text` (so a mensagem); sem campo
+ *  nenhum, viram `raw` e valem para a linha inteira — unico jeito de alcancar
+ *  as linhas que nem sao logcat. */
 function fileSearchParams(tab, query) {
   const params = new URLSearchParams({ root: state.root, file: tab.path });
-  const bare = [];
-  const byField = { tag: [], msg: [], pid: [], tid: [], uid: [] };
+  const { fields, keywords } = parseQuery(query, tab);
+  const byField = { tag: [], msg: [], pid: [], tid: [], uid: [], level: [] };
   let negated = 0;
   let unresolved = null;
-  for (const term of parseLiveFilter(query, false, tab)) {
-    if (term.negate) { negated++; continue; }
-    if (term.unresolved) { unresolved = term.value; continue; }
-    if (!term.field) bare.push(...splitAndOr(term.value).groups);
-    else byField[term.field].push(term.re.source);
+
+  for (const f of fields) {
+    if (f.negate) { negated++; continue; }
+    if (f.unresolved) { unresolved = f.value; continue; }
+    if (byField[f.field]) byField[f.field].push(f.pattern);
   }
-  // Cada `raw` e uma exigencia: a linha precisa casar com todas. O servidor
-  // usa a mais longa para triar e confere as outras so nas candidatas.
-  for (const r of bare) params.append("raw", r);
-  if (byField.tag.length) params.set("tag", exactPattern(byField.tag.join("|")));
-  if (byField.msg.length) params.set("text", byField.msg.join("|"));
+  if (byField.tag.length) params.set("tag", byField.tag.join("|"));
+  if (byField.uid.length) params.set("uid", byField.uid.join("|"));
   if (byField.pid.length) params.set("pid", byField.pid.join("|"));
   if (byField.tid.length) params.set("tid", byField.tid.join("|"));
-  if (byField.uid.length) params.set("uid", byField.uid.join("|"));
-  return { params, hasCriteria: [...params.keys()].length > 2, negated, unresolved };
+  if (byField.level.length) params.set("levels", byField.level.join(","));
+  // text: escrito a mao continua valendo como palavra-chave da mensagem.
+  const words = [...byField.msg];
+  if (keywords) words.push(...splitAndOr(keywords).groups);
+
+  const hasField = [...params.keys()].length > 2;
+  // Cada entrada e uma exigencia: a linha precisa casar com todas. O servidor
+  // usa a mais longa para triar e confere as outras so nas candidatas.
+  for (const w of words) params.append(hasField ? "text" : "raw", w);
+
+  return {
+    params,
+    hasCriteria: [...params.keys()].length > 2,
+    negated,
+    unresolved,
+  };
 }
 
 /** Leva o foco para a caixa de busca do painel ativo (Ctrl+F / Ctrl+Shift+F). */
@@ -3058,6 +3074,13 @@ function stepHighlight(hl, delta) {
 function addHighlight(pattern, caseSensitive) {
   pattern = (pattern || "").trim();
   if (!pattern) return null;
+  // Mesma gramatica da busca: "a|b" e "a&b" viram um destaque por palavra,
+  // cada um com sua cor. Espaco continua fazendo parte da frase.
+  if (!/[()[\]\\]/.test(pattern) && /[|&]/.test(pattern)) {
+    let last = null;
+    for (const word of splitAndOr(pattern).words) last = addHighlight(word, caseSensitive);
+    return last;
+  }
   const existing = state.highlights.find((h) => h.pattern === pattern);
   if (existing) {
     existing.enabled = true;
