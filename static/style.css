@@ -792,24 +792,27 @@ mark.hl-7, .hl-chip.hl-7, .hl-swatch.hl-7, .fd-term.hl-7 { background: #fcc2d7; 
 .fd-section { border-bottom: 1px solid var(--border-soft); }
 /* Colapsada, a secao mostra so as palavras e a contagem — o resumo pedido. */
 .fd-section.collapsed .fd-list { display: none; }
+/* Duas linhas: a de cima (palavras) pode crescer e quebrar quando o filtro
+   tem muitos termos; a de baixo (origem/contagem/paginacao/botoes) fica
+   sempre numa linha so. A altura total e medida em JS (buildSection) e vira
+   --sec-head-h so dentro desta secao, porque o cabecalho da tabela logo
+   abaixo e sticky e precisa saber exatamente onde a segunda linha termina. */
 .fd-sec-head {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  gap: 3px;
   padding: 4px 8px;
   background: var(--bg-alt);
   font-size: 11.5px;
   position: sticky;
   top: 0;
   z-index: 4;
-  /* Altura fixa: a linha de cabecalho da tabela gruda logo abaixo dela, e uma
-     altura variavel faria as duas se sobreporem. */
-  height: var(--sec-head-h);
-  flex-wrap: nowrap;
-  overflow: hidden;
 }
-.fd-chips { overflow-x: auto; scrollbar-width: none; }
-.fd-chips::-webkit-scrollbar { display: none; }
+.fd-sec-row1, .fd-sec-row2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 .fd-marked > .fd-sec-head { background: color-mix(in srgb, var(--accent) 12%, var(--bg-alt)); }
 .fd-toggle {
   border: none;
@@ -818,7 +821,7 @@ mark.hl-7, .hl-chip.hl-7, .hl-swatch.hl-7, .fd-term.hl-7 { background: #fcc2d7; 
   padding: 0 2px;
   font-size: 12px;
 }
-.fd-chips { display: flex; gap: 4px; flex-wrap: nowrap; }
+.fd-chips { display: flex; gap: 4px; flex-wrap: wrap; flex: 1 1 auto; min-width: 0; }
 .fd-term {
   padding: 0 6px;
   border-radius: 3px;
@@ -853,6 +856,36 @@ mark.hl-7, .hl-chip.hl-7, .hl-swatch.hl-7, .fd-term.hl-7 { background: #fcc2d7; 
 }
 .fd-count { color: var(--fg-dim); font-size: 11px; white-space: nowrap; }
 .fd-err { color: var(--lvl-E); }
+.fd-count.fd-loading { color: var(--accent); display: flex; align-items: center; }
+
+/* Anel giratorio generico: indica que uma busca esta em andamento, tanto no
+   cabecalho da secao de resultado quanto no botao "Buscar" da barra. */
+@keyframes spin-ring { to { transform: rotate(360deg); } }
+.spin-ring {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: 5px;
+  border: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin-ring .6s linear infinite;
+  flex: 0 0 auto;
+}
+.btn-spinner {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  margin-right: 5px;
+  border: 2px solid rgba(255, 255, 255, .35);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin-ring .6s linear infinite;
+  vertical-align: -1px;
+}
+/* Enquanto a busca esta rodando, o campo e o botao ficam com o cursor de
+   "processando" — o mesmo padrao que o SO usa pra indicar espera. */
+.live-filter.is-loading, button.is-loading { cursor: progress; }
 .fd-check { display: flex; align-items: center; gap: 3px; font-size: 11px; color: var(--fg-dim); }
 .fd-page, .fd-close, .fd-clear { font-size: 11px; padding: 0 6px; }
 
@@ -957,15 +990,15 @@ tr.is-marked td.c-n {
 }
 .root-device[hidden] { display: none; }
 
-/* Origem e paginacao no cabecalho da secao de resultados. */
+/* Origem e paginacao no cabecalho da secao de resultados. O nome do arquivo
+   fica por extenso (sem cortar): ao lado dos chips, na linha 1, ele so
+   quebra pra proxima linha se nao couber, nunca perde texto. */
 .fd-origin {
   color: var(--accent);
   font-size: 10.5px;
-  max-width: 190px;
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  overflow-wrap: anywhere;
 }
 .fd-pagina { color: var(--fg-dim); font-size: 10.5px; white-space: nowrap; }
 
