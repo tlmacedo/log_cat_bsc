@@ -1,9 +1,12 @@
 # Sobe o Log Viewer em container no Windows.
 #
-#   .\scripts\start-windows.ps1 [pasta-de-logs]
+#   .\scripts\start-windows.ps1 [pasta-de-logs] [-Extras pasta1,pasta2]
 #
-# Sem argumento, usa a pasta log\ do repositorio.
-param([string]$LogDir = "")
+# Sem argumento, usa a pasta log\ do repositorio. A pasta de logs, a sua pasta
+# de usuario e o que vier em -Extras ficam visiveis no botao "Procurar...",
+# somente leitura. No Windows cada unidade aparece como /c, /d... dentro do
+# container, porque C:\ nao existe no Linux.
+param([string]$LogDir = "", [string[]]$Extras = @())
 
 $ErrorActionPreference = "Stop"
 Set-Location (Join-Path $PSScriptRoot "..")
@@ -35,6 +38,31 @@ $CaptureDir = Join-Path $Repo "capturas"
 if (-not (Test-Path $CaptureDir)) { New-Item -ItemType Directory -Path $CaptureDir -Force | Out-Null }
 Ok "Logs:     $LogDir  (aparece como /logs no app)"
 Ok "Capturas: $CaptureDir"
+
+# Pastas do host visiveis no botao "Procurar...". No Windows o caminho nao pode
+# ser reproduzido igual (C:\ nao existe no Linux do container), entao cada
+# unidade vira /c, /d... Sao somente leitura.
+$Visiveis = @($LogDir, $env:USERPROFILE)
+foreach ($e in $Extras) { if (Test-Path $e) { $Visiveis += (Resolve-Path $e).Path } }
+
+$Linhas = @(
+  "# Gerado por scripts/start-windows.ps1 - nao edite a mao.",
+  "# Pastas do host visiveis dentro do container, somente leitura.",
+  "services:", "  logviewer:", "    volumes:"
+)
+$Vistos = @()
+foreach ($dir in $Visiveis) {
+  if ([string]::IsNullOrWhiteSpace($dir)) { continue }
+  $ja = $false
+  foreach ($o in $Vistos) { if ($dir -eq $o -or $dir.StartsWith($o + "\")) { $ja = $true } }
+  if ($ja) { continue }
+  $Vistos += $dir
+  # C:\Users\x  ->  /c/Users/x
+  $destino = "/" + $dir.Substring(0,1).ToLower() + ($dir.Substring(2) -replace "\\", "/")
+  $Linhas += ('      - "{0}:{1}:ro"' -f $dir, $destino)
+}
+$Linhas -join "`n" | Set-Content -Path "docker-compose.override.yml" -Encoding ASCII
+Ok ("Visiveis: " + ($Vistos -join "  "))
 
 # --- adb do host ----------------------------------------------------------
 # O container nao enxerga a USB; ele conversa com o adb desta maquina.

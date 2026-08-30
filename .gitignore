@@ -11,3 +11,6 @@ __pycache__/
 # pelos scripts de inicializacao.
 /capturas/
 /.env
+
+# Override gerado pelos scripts com as pastas visiveis do host.
+/docker-compose.override.yml

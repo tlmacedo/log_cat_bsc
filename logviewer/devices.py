@@ -95,6 +95,20 @@ def adb_path():
     return None
 
 
+def _adb_cmd(args):
+    """Linha de comando completa do adb, ja com o servidor configurado."""
+    adb = adb_path()
+    if not adb:
+        raise AdbError("adb nao encontrado. Instale as platform-tools do Android "
+                       "ou coloque o adb no PATH.")
+    prefix = []
+    if ADB_HOST:
+        prefix += ["-H", ADB_HOST]
+    if ADB_PORT:
+        prefix += ["-P", str(ADB_PORT)]
+    return [adb] + prefix + args
+
+
 def _run(args, timeout):
     adb = adb_path()
     if not adb:
@@ -293,3 +307,142 @@ def capture(serial, root=None, with_bugreport=False, buffers=None):
         "serial": serial,
         "identity": identity_from_props(props),
     }
+
+
+# ---------------------------------------------------------------------------
+# Coleta ao vivo
+# ---------------------------------------------------------------------------
+# Uma sessao por aparelho: o adb escreve o logcat direto num arquivo, que a
+# interface abre como qualquer outro. Assim a analise ao vivo e a mesma de um
+# log parado — filtros, buscas e destaques valem igual.
+
+import signal   # noqa: E402  (usado so pela coleta ao vivo)
+
+_sessions = {}
+
+# O filtro vai para a linha de comando do adb, entao aceita apenas o formato de
+# filterspec do logcat (TAG:nivel), sem espaco para nada mais.
+FILTERSPEC_RE = re.compile(r"^[A-Za-z0-9_.*:\-]+$")
+
+
+def _session_state(entry):
+    proc = entry["proc"]
+    if proc.poll() is not None:
+        return "encerrada"
+    return entry["state"]
+
+
+def live_status(serial=None):
+    out = []
+    for key, entry in list(_sessions.items()):
+        if serial and key != serial:
+            continue
+        size = 0
+        try:
+            size = os.path.getsize(entry["file"])
+        except OSError:
+            pass
+        out.append({
+            "serial": key,
+            "state": _session_state(entry),
+            "file": entry["file"],
+            "dir": os.path.dirname(entry["file"]),
+            "filter": entry["filter"],
+            "buffers": entry["buffers"],
+            "started": entry["started"],
+            "size": size,
+        })
+    return out
+
+
+def live_start(serial, filterspec=None, buffers=None, root=None):
+    """Comeca a gravar o logcat do aparelho num arquivo que cresce."""
+    dev = _known_serial(serial)
+    if dev["state"] != "device":
+        raise AdbError(_state_message(dev["state"]))
+
+    live_stop(serial)   # so uma sessao por aparelho
+
+    args = ["-s", serial, "logcat", "-v", "threadtime"]
+    wanted = [b for b in (buffers or ["main"]) if b in {n for n, _ in LOG_BUFFERS}]
+    for b in wanted or ["main"]:
+        args += ["-b", b]
+
+    spec = (filterspec or "").strip()
+    if spec:
+        for token in spec.split():
+            if not FILTERSPEC_RE.match(token):
+                raise AdbError(f"Filtro invalido: {token!r}. Use o formato do "
+                               "logcat, por exemplo 'ActivityManager:I *:S'.")
+            args.append(token)
+
+    props = read_props(serial)
+    path = capture_dir(serial, props, root)
+    target = os.path.join(path, "logcat_live.txt")
+
+    handle = open(target, "wb")
+    try:
+        proc = subprocess.Popen(_adb_cmd(args), stdout=handle,
+                                stderr=subprocess.DEVNULL)
+    except OSError as e:
+        handle.close()
+        raise AdbError(f"Falha iniciando a coleta: {e}")
+
+    _sessions[serial] = {
+        "proc": proc, "handle": handle, "file": target,
+        "filter": spec, "buffers": wanted or ["main"],
+        "started": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "state": "coletando",
+        "identity": identity_from_props(props),
+    }
+    return live_status(serial)[0]
+
+
+def _session(serial):
+    entry = _sessions.get(serial)
+    if not entry:
+        raise AdbError("Nao ha coleta ao vivo para este aparelho.")
+    return entry
+
+
+def live_pause(serial):
+    """Suspende o processo do adb.
+
+    O aparelho continua produzindo log no proprio buffer circular; se a pausa
+    for longa, o que estourar esse buffer se perde. Retomar volta de onde o
+    buffer estiver."""
+    entry = _session(serial)
+    if entry["proc"].poll() is None and entry["state"] == "coletando":
+        entry["proc"].send_signal(signal.SIGSTOP)
+        entry["state"] = "pausada"
+    return live_status(serial)[0]
+
+
+def live_resume(serial):
+    entry = _session(serial)
+    if entry["proc"].poll() is None and entry["state"] == "pausada":
+        entry["proc"].send_signal(signal.SIGCONT)
+        entry["state"] = "coletando"
+    return live_status(serial)[0]
+
+
+def live_stop(serial):
+    """Encerra a coleta. O arquivo gravado ate aqui continua onde esta."""
+    entry = _sessions.pop(serial, None)
+    if not entry:
+        return None
+    proc = entry["proc"]
+    if proc.poll() is None:
+        # Um processo pausado ignora o terminate ate voltar a rodar.
+        if entry["state"] == "pausada":
+            proc.send_signal(signal.SIGCONT)
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    try:
+        entry["handle"].close()
+    except OSError:
+        pass
+    return {"serial": serial, "file": entry["file"], "state": "encerrada"}

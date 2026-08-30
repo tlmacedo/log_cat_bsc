@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Sobe o Log Viewer em container. Serve para macOS e Linux.
 #
-#   ./scripts/start-mac.sh [pasta-de-logs]
+#   ./scripts/start-mac.sh [pasta-de-logs] [outras-pastas...]
 #
-# Sem argumento, usa a pasta log/ do repositorio.
+# Sem argumento, usa a pasta log/ do repositorio. A pasta de logs, a sua pasta
+# de usuario e o que mais for passado ficam visiveis no botao "Procurar...",
+# com o mesmo caminho de dentro do container e somente leitura.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -24,7 +26,7 @@ docker compose version >/dev/null 2>&1 || die \
   "Este Docker nao tem o 'docker compose'. Atualize o Docker Desktop."
 ok "Docker pronto"
 
-# --- Pasta de logs --------------------------------------------------------
+# --- Pastas ---------------------------------------------------------------
 LOG_DIR="${1:-$REPO/log}"
 mkdir -p "$LOG_DIR" 2>/dev/null || true
 [ -d "$LOG_DIR" ] || die "Pasta de logs nao encontrada: $LOG_DIR"
@@ -33,6 +35,38 @@ CAPTURE_DIR="$REPO/capturas"
 mkdir -p "$CAPTURE_DIR"
 ok "Logs:     $LOG_DIR  (aparece como /logs no app)"
 ok "Capturas: $CAPTURE_DIR"
+
+# Pastas visiveis para o botao "Procurar...". Cada uma e montada com o MESMO
+# caminho de dentro do container, para que o que voce ve no Finder seja o que o
+# app mostra. Sao somente leitura.
+shift || true
+EXTRA=("$LOG_DIR" "$HOME")
+for arg in "$@"; do
+  [ -d "$arg" ] && EXTRA+=("$(cd "$arg" && pwd)")
+done
+
+# Override gerado: o compose principal nao tem como montar uma lista variavel.
+{
+  echo "# Gerado por scripts/start-mac.sh — nao edite a mao."
+  echo "# Pastas do host visiveis dentro do container, com o mesmo caminho e"
+  echo "# somente leitura."
+  echo "services:"
+  echo "  logviewer:"
+  echo "    volumes:"
+} > docker-compose.override.yml
+
+# Descarta repetidos e caminhos ja contidos em outro da lista.
+SEEN=""
+for dir in "${EXTRA[@]}"; do
+  skip=""
+  for other in $SEEN; do
+    case "$dir" in "$other"|"$other"/*) skip=1;; esac
+  done
+  [ -n "$skip" ] && continue
+  SEEN="$SEEN $dir"
+  printf '      - "%s:%s:ro"\n' "$dir" "$dir" >> docker-compose.override.yml
+done
+ok "Visiveis:$SEEN"
 
 # --- adb do host ----------------------------------------------------------
 # O container nao enxerga a USB; ele conversa com o adb desta maquina.

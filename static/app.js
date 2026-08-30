@@ -414,6 +414,8 @@ function newTab(path) {
     timeRange: null,
     // Blocos de stack trace abertos (por padrao ficam dobrados).
     openTraces: new Set(),
+    // Segue o fim do arquivo enquanto ele cresce (coleta ao vivo).
+    follow: false,
     // Linha do tempo: fechada ate ser pedida.
     timelineOpen: false,
     // Janela de resultados: uma secao por busca feita.
@@ -1177,6 +1179,9 @@ function buildPanel(tab, paneIndex) {
     <button data-act="find" title="Buscar e destacar nesta pagina (Ctrl+F)">&#128269;</button>
     <button data-act="prevhit" title="Ocorrencia anterior (Ctrl+,)">&#8963;</button>
     <button data-act="nexthit" title="Proxima ocorrencia (Ctrl+.)">&#8964;</button>
+    <label class="toolbar-check" title="Recarregar o fim do arquivo automaticamente — util enquanto uma coleta ao vivo esta gravando">
+      <input type="checkbox" data-act="follow"${tab.follow ? " checked" : ""}> Seguir
+    </label>
     <label class="toolbar-check" title="Quebrar linhas longas no espaco horizontal disponivel, em vez de rolar na horizontal">
       <input type="checkbox" data-act="wrap"${tab.wrapText ? " checked" : ""}> Quebrar linha
     </label>
@@ -1965,6 +1970,10 @@ function wirePanel(tab, panel, toolbar, wrap, shown, paneIndex) {
     if (!n || n < 1) return;
     jumpToLine(tab, Math.min(n, tab.totalLines || n));
   });
+  act("follow").addEventListener("change", (e) => {
+    tab.follow = e.target.checked;
+    if (tab.follow) loadFileContent(tab, { tail: true });
+  });
   act("wrap").addEventListener("change", (e) => {
     tab.wrapText = e.target.checked;
     refreshPanel(tab);
@@ -2598,6 +2607,7 @@ function renderUsb(data) {
       `<div class="usb-title">${escapeHtml(id.modelo?.value || dev.serial)}</div>` +
       rows +
       `<button class="usb-capture" data-serial="${escapeHtml(dev.serial)}">Capturar logs</button>` +
+      `<div class="usb-live" data-serial="${escapeHtml(dev.serial)}"></div>` +
       `</div>`;
   }).join("") +
     `<p class="side-hint">Cada aparelho grava numa pasta propria, nomeada por ` +
@@ -2606,7 +2616,118 @@ function renderUsb(data) {
   usbListEl.querySelectorAll(".usb-capture").forEach((btn) => {
     btn.addEventListener("click", () => captureUsb(btn, btn.dataset.serial));
   });
+  renderLive();
 }
+
+// ---------------------------------------------------------------------------
+// Coleta ao vivo do logcat
+// ---------------------------------------------------------------------------
+// O adb grava num arquivo que cresce e o app abre esse arquivo como qualquer
+// outro; a analise ao vivo e a mesma de um log parado.
+
+let liveSessions = [];
+
+async function refreshLive() {
+  try {
+    const res = await fetch("/api/live_status");
+    const data = await res.json();
+    liveSessions = data.sessions || [];
+  } catch { liveSessions = []; }
+  renderLive();
+}
+
+function liveOf(serial) {
+  return liveSessions.find((s) => s.serial === serial) || null;
+}
+
+function renderLive() {
+  usbListEl.querySelectorAll(".usb-live").forEach((box) => {
+    const serial = box.dataset.serial;
+    const live = liveOf(serial);
+    const rodando = live && live.state !== "encerrada";
+
+    box.innerHTML = rodando
+      ? `<div class="live-state live-${live.state}">` +
+          `${live.state === "pausada" ? "\u23f8 pausada" : "\u25cf coletando"}` +
+          ` \u00b7 ${fmtSize(live.size)}` +
+          `${live.filter ? " \u00b7 filtro " + escapeHtml(live.filter) : ""}</div>` +
+        `<div class="live-btns">` +
+          `<button data-live="${live.state === "pausada" ? "resume" : "pause"}">` +
+            `${live.state === "pausada" ? "Retomar" : "Pausar"}</button>` +
+          `<button data-live="restart">Reiniciar</button>` +
+          `<button data-live="stop">Parar</button>` +
+          `<button data-live="open">Abrir</button>` +
+        `</div>`
+      : `<div class="live-btns">` +
+          `<input class="live-filter-spec" placeholder="filtro do logcat, ex: *:E" ` +
+            `title="Formato do logcat: TAG:nivel. Ex: ActivityManager:I *:S">` +
+          `<button data-live="start" class="primary">Coletar ao vivo</button>` +
+        `</div>`;
+
+    box.querySelectorAll("[data-live]").forEach((btn) => {
+      btn.addEventListener("click", () => liveAction(serial, btn.dataset.live, box));
+    });
+  });
+}
+
+async function liveAction(serial, action, box) {
+  if (action === "open") {
+    const live = liveOf(serial);
+    if (live) await abrirAoVivo(live);
+    return;
+  }
+  const params = new URLSearchParams({ action, serial });
+  const spec = box.querySelector(".live-filter-spec");
+  if (spec && spec.value.trim()) params.set("filter", spec.value.trim());
+
+  try {
+    const res = await fetch(`/api/live?${params}`, { method: "POST" });
+    const data = await res.json();
+    if (!res.ok) {
+      setStatus(data.error || "Erro na coleta.", true);
+      return;
+    }
+    await refreshLive();
+    if (action === "start" || action === "restart") {
+      setStatus(`Coletando o logcat de ${serial}...`);
+      await abrirAoVivo(data);
+    } else {
+      setStatus(`Coleta ${action === "pause" ? "pausada" : action === "resume" ? "retomada" : "encerrada"}.`);
+    }
+  } catch (err) {
+    setStatus("Falha na requisicao: " + err, true);
+  }
+}
+
+/** Abre o arquivo que esta sendo gravado e liga o modo "seguir". */
+async function abrirAoVivo(live) {
+  el("#rootInput").value = live.dir;
+  state.rootDeviceBase = live.dir;
+  if (live.identity) setRootDevice(live.identity);
+  await loadRoot();
+  // Sem trocar de aba: os controles de pausar e parar ficam nesta, e escondê-los
+  // logo depois de iniciar a coleta deixaria o usuario sem como interromper.
+  openFile(live.file.split("/").pop());
+  const tab = activeTab();
+  if (tab) {
+    tab.follow = true;
+    await loadFileContent(tab, { tail: true });
+  }
+}
+
+// Enquanto houver coleta rodando, o estado dos botoes e o tamanho do arquivo
+// se atualizam sozinhos.
+setInterval(() => {
+  if (liveSessions.some((s) => s.state !== "encerrada")) refreshLive();
+}, 3000);
+
+// O modo "seguir" recarrega o fim do arquivo que cresce.
+setInterval(() => {
+  for (const tab of state.tabs) {
+    if (!tab.follow || tab.binary) continue;
+    loadFileContent(tab, { tail: true });
+  }
+}, 3000);
 
 async function captureUsb(btn, serial) {
   const withBugreport = el("#usbBugreport").checked;

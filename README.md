@@ -38,10 +38,21 @@ Para parar: `docker compose down` (ou `./scripts/stop.sh`).
 | No seu computador | Dentro do app | Observacao |
 |---|---|---|
 | a pasta que voce passou ao script | `/logs` | montada **somente leitura** |
+| a mesma pasta, no caminho original | o mesmo caminho | para o botao **Procurar...** |
+| a sua pasta de usuario | o mesmo caminho | somente leitura |
 | `capturas/` no repositorio | `/capturas` | capturas de aparelhos USB |
 
-Os caminhos aparecem como `/logs/...` na interface porque e assim que o
-container os enxerga. O conteudo e o da sua pasta.
+O botao **Procurar...** navega pelas pastas que o servidor enxerga. Como a sua
+pasta de logs e a sua pasta de usuario sao montadas com o **mesmo caminho**, o
+que voce ve no Finder e o que aparece ali. Para liberar outras pastas, passe-as
+ao script:
+
+```bash
+./scripts/start-mac.sh /pasta/de/logs /outra/pasta /mais/uma
+```
+
+No Windows cada unidade vira `/c`, `/d`... porque `C:\` nao existe no Linux do
+container.
 
 ### Como o app trata os seus logs
 
@@ -96,6 +107,12 @@ script avisa.
   e o mapa PID -> processo extraidos do proprio log.
 - **Captura de aparelhos USB**: despeja os buffers de logcat e as propriedades
   numa pasta por aparelho, nomeada com modelo e serial.
+- **Coleta ao vivo** do logcat de um aparelho ligado, com filtro do proprio
+  logcat (`*:E`, `ActivityManager:I *:S`), e botoes de pausar, retomar,
+  reiniciar e parar. O arquivo cresce enquanto voce le, e a caixa **Seguir**
+  na barra do painel acompanha o fim. Pausar suspende a gravacao; o aparelho
+  segue produzindo log no proprio buffer circular, entao uma pausa longa pode
+  perder o que estourar esse buffer.
 - Destaques de palavra com navegacao (F3), marcadores, exportacao, sessao
   salva, glossario de siglas e temas claro e escuro.
 

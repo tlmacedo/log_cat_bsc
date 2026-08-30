@@ -326,6 +326,50 @@ def post_usb_capture():
     return jsonify(result)
 
 
+@api.get("/live_status")
+def get_live_status():
+    """Estado das coletas ao vivo em andamento."""
+    try:
+        return jsonify({"sessions": devices.live_status(
+            request.args.get("serial") or None)})
+    except devices.AdbError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@api.post("/live")
+def post_live():
+    """Comanda a coleta ao vivo: iniciar, pausar, retomar, parar ou reiniciar."""
+    action = (request.args.get("action") or "").strip()
+    serial = (request.args.get("serial") or "").strip()
+    try:
+        if action == "start":
+            result = devices.live_start(
+                serial,
+                filterspec=request.args.get("filter"),
+                buffers=[b for b in request.args.get("buffers", "").split(",") if b],
+            )
+        elif action == "pause":
+            result = devices.live_pause(serial)
+        elif action == "resume":
+            result = devices.live_resume(serial)
+        elif action == "stop":
+            result = devices.live_stop(serial)
+        elif action == "restart":
+            devices.live_stop(serial)
+            result = devices.live_start(
+                serial,
+                filterspec=request.args.get("filter"),
+                buffers=[b for b in request.args.get("buffers", "").split(",") if b],
+            )
+        else:
+            return jsonify({"error": f"Acao desconhecida: {action!r}"}), 400
+    except devices.AdbError as e:
+        return jsonify({"error": str(e)}), 400
+    except OSError as e:
+        return jsonify({"error": f"Erro na coleta: {e}"}), 500
+    return jsonify(result or {"serial": serial, "state": "encerrada"})
+
+
 @api.get("/glossary")
 def get_glossary():
     """Siglas de log do Android (PID, TID, UID, niveis, AMS/WMS/PMS, ANR, OOM...)."""
