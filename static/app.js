@@ -565,6 +565,29 @@ function resolvePid(tab, value) {
   return { pattern: `^(?:${pids.join("|")})$`, pids, byName: true };
 }
 
+/** Quebra o valor de um termo na gramatica do app:
+ *    "a&b"  -> a linha precisa ter as duas (E)
+ *    "a|b"  -> basta uma das duas (OU)
+ *    "a&b|c"-> precisa de `a` e de (`b` ou `c`)
+ *  O `&` nao existe em regex, entao vira lookahead; o `|` e o do proprio regex.
+ *  Padroes com barra invertida ficam intactos: ali o autor sabe o que quer. */
+function splitAndOr(value) {
+  if (value.includes("\\") || !value.includes("&")) {
+    return { groups: [value], words: value.split("|").filter(Boolean) };
+  }
+  const groups = value.split("&").filter(Boolean);
+  return { groups, words: groups.flatMap((g) => g.split("|")).filter(Boolean) };
+}
+
+/** Regex unica equivalente ao termo, para o casamento no cliente (uma linha de
+ *  cada vez, entao o lookahead aqui e barato). No servidor os grupos de E vao
+ *  separados, porque la a varredura e por bloco e o lookahead custaria caro. */
+function termPattern(value) {
+  const { groups } = splitAndOr(value);
+  if (groups.length < 2) return value;
+  return groups.map((g) => `(?=.*(?:${g}))`).join("") + ".*";
+}
+
 function parseLiveFilter(query, caseSensitive, tab) {
   const terms = [];
   for (let raw of (query || "").trim().split(/\s+/)) {
@@ -595,7 +618,10 @@ function parseLiveFilter(query, caseSensitive, tab) {
       });
       continue;
     }
-    terms.push({ field, negate, value, re: safeRegex(value, caseSensitive) });
+    terms.push({
+      field, negate, value,
+      re: safeRegex(termPattern(value), caseSensitive),
+    });
   }
   return terms;
 }
@@ -624,10 +650,12 @@ function termsOf(query, start = 0, tab = null) {
       }
       continue;
     }
-    const src = term.re.source;
-    // Um "a|b|c" simples vira uma cor por alternativa; com parenteses ou
-    // colchetes o "|" pode ser interno ao regex, entao fica uma cor so.
-    const parts = /[()[\]\\]/.test(src) ? [src] : src.split("|").filter(Boolean);
+    // Uma cor por palavra, tanto nas alternativas de "a|b" quanto nos termos
+    // exigidos de "a&b". Com parenteses ou colchetes o "|" pode ser interno ao
+    // regex, entao o termo fica com uma cor so.
+    const parts = /[()[\]\\]/.test(term.value)
+      ? [term.value]
+      : splitAndOr(term.value).words;
     for (const part of parts) {
       out.push({ pattern: part, label: part, color: color % HL_COLORS, field: term.field });
       color++;
@@ -648,7 +676,6 @@ function activeTerms(tab) {
     out.push(t);
   };
   for (const section of tab.findSections || []) section.terms.forEach(push);
-  termsOf(tab.liveFilter, tab.colorCursor || 0, tab).forEach(push);
   return out;
 }
 
@@ -822,6 +849,57 @@ function isHighlighted(tab, line) {
   return (c.tag && tab.highlightTags.has(c.tag)) || (c.pid && tab.highlightPids.has(c.pid));
 }
 
+// ---------------------------------------------------------------------------
+// Colunas: mesma definicao para a tabela de log e para a de resultados, com
+// largura ajustavel arrastando a borda do cabecalho.
+// ---------------------------------------------------------------------------
+
+const COLUMNS = [
+  { key: "n", cls: "c-n", label: "Linha", sigla: null },
+  { key: "file", cls: "c-file", label: "Arquivo", sigla: null },
+  { key: "lvl", cls: "c-lvl", label: "L.", sigla: "L." },
+  { key: "time", cls: "c-time", label: "Hora", sigla: "Hora" },
+  { key: "pid", cls: "c-pid", label: "PID", sigla: "PID" },
+  { key: "tid", cls: "c-tid", label: "TID", sigla: "TID" },
+  { key: "tag", cls: "c-tag", label: "Tag", sigla: "Tag" },
+];
+
+const COL_WIDTHS_KEY = "logviewer.colWidths";
+const DEFAULT_COL_WIDTHS = { n: 74, file: 150, lvl: 20, time: 132, pid: 108, tid: 52, tag: 150 };
+state.colWidths = { ...DEFAULT_COL_WIDTHS, ...store(COL_WIDTHS_KEY, {}) };
+
+/** As larguras viram variaveis CSS: mudar uma redesenha as duas tabelas sem
+ *  precisar refazer o HTML. */
+function applyColWidths() {
+  for (const [key, px] of Object.entries(state.colWidths)) {
+    document.documentElement.style.setProperty(`--w-${key}`, px + "px");
+  }
+}
+applyColWidths();
+
+/** Conteudo de uma celula de largura fixa. O span com largura propria e o que
+ *  segura a coluna: em tabela de layout automatico, largura no <td> e so uma
+ *  sugestao e o conteudo manda. */
+function cell(colKey, html, attrs = "") {
+  return `<span class="cell cell-${colKey}"${attrs}>${html}</span>`;
+}
+
+function tableHeadHtml(withFile) {
+  const cols = COLUMNS.filter((c) => c.key !== "file" || withFile);
+  // O colgroup e o que faz cabecalho e corpo concordarem sobre a largura de
+  // cada coluna; sem ele o navegador redistribui a sobra por conta propria.
+  const colgroup = "<colgroup>" +
+    cols.map((c) => `<col class="col-${c.key}">`).join("") +
+    "<col></colgroup>";
+  const th = cols.map((c) => {
+    const e = c.sigla && glossaryEntry(c.sigla);
+    const title = e ? ` title="${escapeHtml(`${e.sigla} - ${e.nome}: ${e.desc}`)}"` : "";
+    return `<th class="${c.cls}"${title}><span class="cell cell-${c.key}">${c.label}</span>` +
+      `<span class="col-resize" data-col="${c.key}" title="Arraste para redimensionar"></span></th>`;
+  }).join("");
+  return colgroup + `<thead><tr>${th}<th>Texto</th></tr></thead>`;
+}
+
 function rowHtml(tab, line, groups) {
   const c = line.c;
   const classes = ["lvl-" + (c && c.level ? c.level : "none")];
@@ -854,9 +932,12 @@ function rowHtml(tab, line, groups) {
     // Linha fora do formato logcat (cabecalho de bugreport, dumpsys, etc):
     // mostra o texto cru ocupando as colunas de conteudo.
     return `<tr class="${classes.join(" ")}" data-line="${line.n}"${groupAttrs}>` +
-      `<td class="c-n">${line.n}</td>` +
-      `<td class="c-lvl"></td><td class="c-time"></td><td class="c-pid"></td>` +
-      `<td class="c-tid"></td><td class="c-tag"></td>` +
+      `<td class="c-n">${cell("n", String(line.n))}</td>` +
+      `<td class="c-lvl">${cell("lvl", "")}</td>` +
+      `<td class="c-time">${cell("time", "")}</td>` +
+      `<td class="c-pid">${cell("pid", "")}</td>` +
+      `<td class="c-tid">${cell("tid", "")}</td>` +
+      `<td class="c-tag">${cell("tag", "")}</td>` +
       `<td class="c-text c-raw">${toggle}${decorateText(line.text, tab)}</td></tr>`;
   }
 
@@ -875,12 +956,12 @@ function rowHtml(tab, line, groups) {
   // PID espera ver a marcacao onde o valor aparece, nao so na mensagem.
   return `<tr class="${classes.join(" ")}" data-line="${line.n}"${groupAttrs}` +
     ` data-tag="${escapeHtml(c.tag || "")}" data-pid="${escapeHtml(c.pid || "")}">` +
-    `<td class="c-n">${line.n}</td>` +
-    `<td class="c-lvl"${levelTitle(c.level)}>${escapeHtml(c.level || "")}</td>` +
-    `<td class="c-time">${decorateText(c.time || "", tab)}</td>` +
-    `<td class="c-pid"${pidTitle}>${pidCell}</td>` +
-    `<td class="c-tid">${decorateText(c.tid || "", tab)}</td>` +
-    `<td class="c-tag"${tagInfo}>${decorateText(c.tag || "", tab)}</td>` +
+    `<td class="c-n">${cell("n", String(line.n))}</td>` +
+    `<td class="c-lvl">${cell("lvl", escapeHtml(c.level || ""), levelTitle(c.level))}</td>` +
+    `<td class="c-time">${cell("time", decorateText(c.time || "", tab))}</td>` +
+    `<td class="c-pid">${cell("pid", pidCell, pidTitle)}</td>` +
+    `<td class="c-tid">${cell("tid", decorateText(c.tid || "", tab))}</td>` +
+    `<td class="c-tag">${cell("tag", decorateText(c.tag || "", tab), tagInfo)}</td>` +
     `<td class="c-text">${toggle}${decorateText(c.msg ?? line.text, tab)}</td></tr>`;
 }
 
@@ -1013,15 +1094,9 @@ function buildPanel(tab, paneIndex) {
     wrap.innerHTML = `<div class="empty-state">Nenhuma linha para exibir${tab.lines.length ? " com os filtros atuais" : ""}.</div>`;
   } else {
     const groups = groupTraces(shown);
-    const th = (label, sigla) => {
-      const e = glossaryEntry(sigla);
-      return `<th${e ? ` title="${escapeHtml(`${e.sigla} - ${e.nome}: ${e.desc}`)}"` : ""}>${label}</th>`;
-    };
     wrap.innerHTML =
-      `<table class="log-table${tab.wrapText ? " wrap" : ""}"><thead><tr>` +
-      '<th class="c-n">Linha</th>' + th("L.", "L.") + th("Hora", "Hora") +
-      th("PID", "PID") + th("TID", "TID") + th("Tag", "Tag") + "<th>Texto</th>" +
-      "</tr></thead><tbody>" +
+      `<table class="log-table${tab.wrapText ? " wrap" : ""}">` +
+      tableHeadHtml(false) + "<tbody>" +
       shown.map((l) => rowHtml(tab, l, groups)).join("") +
       "</tbody></table>";
   }
@@ -1110,12 +1185,12 @@ function fileSearchParams(tab, query) {
   for (const term of parseLiveFilter(query, false, tab)) {
     if (term.negate) { negated++; continue; }
     if (term.unresolved) { unresolved = term.value; continue; }
-    if (!term.field) bare.push(term.re.source);
+    if (!term.field) bare.push(...splitAndOr(term.value).groups);
     else byField[term.field].push(term.re.source);
   }
-  // Varios termos no mesmo campo sao E: a linha precisa conter todos.
-  const all = (arr) => arr.map((x) => `(?=.*(?:${x}))`).join("") + ".*";
-  if (bare.length) params.set("raw", bare.length === 1 ? bare[0] : all(bare));
+  // Cada `raw` e uma exigencia: a linha precisa casar com todas. O servidor
+  // usa a mais longa para triar e confere as outras so nas candidatas.
+  for (const r of bare) params.append("raw", r);
   if (byField.tag.length) params.set("tag", byField.tag.join("|"));
   if (byField.msg.length) params.set("text", byField.msg.join("|"));
   if (byField.pid.length) params.set("pid", byField.pid.join("|"));
@@ -1346,27 +1421,52 @@ function chipsHtml(section) {
   return chips.join("");
 }
 
-function resultRowHtml(tab, section, i) {
-  const r = section.results;
-  const c = r.columns[i];
-  const text = r.lines[i];
-  const n = r.numbers[i];
-  const file = r.files ? r.files[i] : null;
-  const classes = ["fd-row"];
+/** Uma linha de resultado, nas mesmas colunas da tabela de log. */
+function resultRowHtml(tab, row, withFile) {
+  const { n, c, text, file } = row;
+  const classes = ["fd-row", "lvl-" + (c && c.level ? c.level : "none")];
   if (levelMarked(tab, c)) classes.push("lvl-mark", "mk-" + c.level);
-  if (tab.exportMarks.has(n) && !file) classes.push("is-marked");
-  // A linha aberta por duplo clique fica destacada; guardar no estado faz o
-  // destaque sobreviver ao redesenho que a navegacao provoca.
-  if (section.activeLine === n) classes.push("on");
-  const badge = c && c.level ? `<span class="badge badge-${c.level}">${c.level}</span>` : "";
-  const tag = c && c.tag ? `<span class="fd-tag">${escapeHtml(c.tag)}</span>` : "";
-  const fileCell = file
-    ? `<span class="fd-file" title="${escapeHtml(file)}">${escapeHtml(file.split("/").pop())}</span>`
+  if (row.marked) classes.push("is-marked");
+  if (row.active) classes.push("on");
+
+  const fileCell = withFile
+    ? `<td class="c-file">${cell("file", escapeHtml((file || "").split("/").pop()),
+        file ? ` title="${escapeHtml(file)}"` : "")}</td>`
     : "";
-  return `<div class="${classes.join(" ")}" data-line="${n}"` +
+
+  if (!c) {
+    // Linha fora do formato logcat: o texto cru ocupa a coluna de conteudo.
+    return `<tr class="${classes.join(" ")}" data-line="${n}"` +
+      `${file ? ` data-file="${escapeHtml(file)}"` : ""}>` +
+      `<td class="c-n">${cell("n", fmtNum(n))}</td>${fileCell}` +
+      `<td class="c-lvl">${cell("lvl", "")}</td>` +
+      `<td class="c-time">${cell("time", "")}</td>` +
+      `<td class="c-pid">${cell("pid", "")}</td>` +
+      `<td class="c-tid">${cell("tid", "")}</td>` +
+      `<td class="c-tag">${cell("tag", "")}</td>` +
+      `<td class="c-text c-raw">${row.body ?? decorateText(text || "", tab)}</td></tr>`;
+  }
+
+  const proc = processName(tab, c.pid);
+  const pidCell = decorateText(c.pid || "", tab) +
+    (proc ? ` <span class="proc-name">${escapeHtml(shortProc(proc))}</span>` : "");
+  return `<tr class="${classes.join(" ")}" data-line="${n}"` +
     `${file ? ` data-file="${escapeHtml(file)}"` : ""}>` +
-    `${fileCell}<span class="fd-n">${fmtNum(n)}</span>` +
-    `<span class="fd-txt">${badge}${tag}${decorateText(text, tab)}</span></div>`;
+    `<td class="c-n">${cell("n", fmtNum(n))}</td>${fileCell}` +
+    `<td class="c-lvl">${cell("lvl", escapeHtml(c.level || ""), levelTitle(c.level))}</td>` +
+    `<td class="c-time">${cell("time", decorateText(c.time || "", tab))}</td>` +
+    `<td class="c-pid">${cell("pid", pidCell, proc ? ` title="PID ${c.pid} - ${escapeHtml(proc)}"` : "")}</td>` +
+    `<td class="c-tid">${cell("tid", decorateText(c.tid || "", tab))}</td>` +
+    `<td class="c-tag">${cell("tag", decorateText(c.tag || "", tab), glossaryTagTitle(c.tag))}</td>` +
+    `<td class="c-text">${row.body ?? decorateText(c.msg ?? text ?? "", tab)}</td></tr>`;
+}
+
+/** Envolve as linhas numa tabela com cabecalho, igual a do log. */
+function resultTableHtml(tab, rows, withFile, wrapText) {
+  return `<table class="log-table fd-table${wrapText ? " wrap" : ""}">` +
+    tableHeadHtml(withFile) + "<tbody>" +
+    rows.map((row) => resultRowHtml(tab, row, withFile)).join("") +
+    "</tbody></table>";
 }
 
 function buildSection(tab, section) {
@@ -1401,8 +1501,15 @@ function buildSection(tab, section) {
 
   const list = box.querySelector(".fd-list");
   if (r && r.lines.length) {
-    list.innerHTML = r.lines.map((_, i) => resultRowHtml(tab, section, i)).join("") +
-      (!r.files && r.matched > r.lines.length
+    const withFile = !!r.files;
+    const rows = r.lines.map((text, i) => ({
+      n: r.numbers[i], c: r.columns[i], text,
+      file: withFile ? r.files[i] : null,
+      marked: !withFile && tab.exportMarks.has(r.numbers[i]),
+      active: section.activeLine === r.numbers[i],
+    }));
+    list.innerHTML = resultTableHtml(tab, rows, withFile, tab.wrapText) +
+      (!withFile && r.matched > r.lines.length
         ? `<div class="fd-more">mostrando ${fmtNum(r.offset + 1)}-` +
           `${fmtNum(r.offset + r.lines.length)} de ${fmtNum(r.matched)}</div>`
         : "");
@@ -1439,6 +1546,7 @@ function buildSection(tab, section) {
   // Duplo clique navega. O clique simples nao faz nada de proposito: assim da
   // para selecionar trechos de uma ou varias linhas aqui sem que a janela do
   // log fique pulando a cada toque.
+  wireColumnResize(box);
   list.addEventListener("dblclick", (e) => {
     const row = e.target.closest(".fd-row");
     if (!row) return;
@@ -1469,19 +1577,17 @@ function buildMarkedSection(tab) {
 
   const list = box.querySelector(".fd-list");
   if (rows.length) {
-    list.innerHTML = rows.map((row) => {
-      const classes = ["fd-row"];
-      if (levelMarked(tab, row.c)) classes.push("lvl-mark", "mk-" + row.c.level);
-      if (tab.markedActiveLine === row.n) classes.push("on");
-      const flags = (row.marked ? '<span class="fd-flag">✓</span>' : "") +
-        (row.bookmarked ? '<span class="fd-flag">⚑</span>' : "");
-      const body = row.text === null
-        ? '<span class="fd-out">(fora da pagina carregada — duplo clique para ir ate ela)</span>'
-        : decorateText(row.c ? (row.c.msg ?? row.text) : row.text, tab);
-      return `<div class="${classes.join(" ")}" data-line="${row.n}">` +
-        `<span class="fd-n">${fmtNum(row.n)}</span>` +
-        `<span class="fd-txt">${flags}${body}</span></div>`;
-    }).join("");
+    const shaped = rows.map((row) => ({
+      n: row.n, c: row.c, text: row.text, file: null,
+      marked: row.marked,
+      active: tab.markedActiveLine === row.n,
+      body: (row.marked ? '<span class="fd-flag">&#10003;</span>' : "") +
+        (row.bookmarked ? '<span class="fd-flag">&#9873;</span>' : "") +
+        (row.text === null
+          ? '<span class="fd-out">(fora da pagina carregada — duplo clique para ir ate ela)</span>'
+          : decorateText(row.c ? (row.c.msg ?? row.text) : row.text, tab)),
+    }));
+    list.innerHTML = resultTableHtml(tab, shaped, false, tab.wrapText);
   } else {
     list.innerHTML = '<div class="fd-empty">Nenhuma linha marcada. Use o menu de ' +
       'contexto do log: "Marcar para exportar" ou "Marcar/desmarcar (bookmark)".</div>';
@@ -1501,6 +1607,7 @@ function buildMarkedSection(tab) {
     tab.bookmarks.clear();
     refreshPanel(tab);
   });
+  wireColumnResize(box);
   list.addEventListener("dblclick", (e) => {
     const row = e.target.closest(".fd-row");
     if (!row) return;
@@ -1644,22 +1751,15 @@ function wirePanel(tab, panel, toolbar, wrap, shown, paneIndex) {
   }
 
   const liveInput = toolbar.querySelector(".live-filter");
-  let debounce;
-  // Digitar so repinta as palavras no log; nada e escondido. A busca de fato
-  // acontece no Enter e vai para a janela de resultados.
-  liveInput.addEventListener("input", () => {
-    clearTimeout(debounce);
-    debounce = setTimeout(() => {
-      tab.liveFilter = liveInput.value;
-      refreshPanel(tab);
-    }, 250);
-  });
+  // Digitar apenas guarda o texto. Nada na tela muda ate a busca ser
+  // disparada: o log nao se mexe, e as cores so aparecem depois que a consulta
+  // vira uma secao de resultados.
+  liveInput.addEventListener("input", () => { tab.liveFilter = liveInput.value; });
   // Enter procura no arquivo inteiro: e o gesto natural, e sem ele a busca
   // ficaria presa na pagina carregada.
   liveInput.addEventListener("keydown", (e) => {
     if (e.key !== "Enter") return;
     e.preventDefault();
-    clearTimeout(debounce);
     tab.liveFilter = liveInput.value;
     runSearch(tab);
   });
@@ -1712,6 +1812,8 @@ function wirePanel(tab, panel, toolbar, wrap, shown, paneIndex) {
   });
   act("export").addEventListener("click", () => exportLines(tab, shown));
   act("reset").addEventListener("click", () => resetFilters(tab));
+
+  wireColumnResize(panel);
 
   const tbody = wrap.querySelector("tbody");
   if (!tbody) return;
@@ -1767,6 +1869,41 @@ function wirePanel(tab, panel, toolbar, wrap, shown, paneIndex) {
       refreshPanel(tab);
     }
     showContextMenu(e.clientX, e.clientY, tab, picked);
+  });
+}
+
+/** Arrastar a borda do cabecalho muda a largura da coluna. A largura vive numa
+ *  variavel CSS, entao o ajuste vale ao mesmo tempo para a tabela de log e para
+ *  as de resultado, sem refazer o HTML durante o arrasto. */
+function wireColumnResize(root) {
+  root.querySelectorAll(".col-resize").forEach((handle) => {
+    handle.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const key = handle.dataset.col;
+      const startX = e.clientX;
+      const startW = state.colWidths[key] ?? DEFAULT_COL_WIDTHS[key] ?? 80;
+      document.body.classList.add("resizing-col");
+      const onMove = (ev) => {
+        state.colWidths[key] = Math.max(16, Math.round(startW + ev.clientX - startX));
+        applyColWidths();
+      };
+      const onUp = () => {
+        document.body.classList.remove("resizing-col");
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        persist(COL_WIDTHS_KEY, state.colWidths);
+      };
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    });
+    // Duplo clique na borda devolve a largura padrao da coluna.
+    handle.addEventListener("dblclick", (e) => {
+      e.stopPropagation();
+      state.colWidths[handle.dataset.col] = DEFAULT_COL_WIDTHS[handle.dataset.col];
+      applyColWidths();
+      persist(COL_WIDTHS_KEY, state.colWidths);
+    });
   });
 }
 
@@ -2216,7 +2353,7 @@ function filterGroups(tab, f) {
   for (const node of filterNodes(f)) {
     const g = {};
     if (node.tag) g.tag = node.tag;
-    if (node.text) g.raw = node.text;
+    if (node.text) g.raw = splitAndOr(node.text).groups;
     if (node.tid) g.tid = node.tid;
     if (node.levels && node.levels.length) g.levels = node.levels.join(",");
     if (node.pid) {
@@ -3028,6 +3165,9 @@ document.addEventListener("keydown", (e) => {
     return;
   }
   if (mod && e.key.toLowerCase() === "c" && !typing) {
+    // Havendo texto selecionado com o mouse, quem copia e o navegador: copiar
+    // a linha inteira por cima descartaria justamente o trecho escolhido.
+    if (String(window.getSelection() || "").trim()) return;
     const tab = activeTab();
     if (tab && tab.selected.size) {
       e.preventDefault();

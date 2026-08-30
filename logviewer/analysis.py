@@ -284,15 +284,26 @@ class FilterSpec:
         # termo digitado sem prefixo deve fazer: quem procura "Vold" espera
         # achar tanto no texto quanto na TAG. Em um bugreport a maior parte das
         # linhas nem e logcat, e so `raw` alcanca essas.
-        self.raw = re.compile(raw, flags) if raw else None
+        #
+        # Vem como lista quando o usuario exige varias palavras na mesma linha
+        # ("a&b" ou dois termos soltos): todas precisam casar. Cada elemento
+        # ainda pode ter "|" internamente, que continua sendo "ou".
+        raw_list = [raw] if isinstance(raw, str) else list(raw or ())
+        raw_list = [r for r in raw_list if r]
+        self.raw_list = [re.compile(r, flags) for r in raw_list]
+        self.raw = self.raw_list[0] if self.raw_list else None
+        # A triagem usa o padrao mais longo: literal maior tende a ser mais
+        # raro, entao descarta mais linhas antes da verificacao completa.
+        self.raw_probe_src = max(raw_list, key=len) if raw_list else None
         # Versao em bytes do padrao, usada quando o filtro so olha a linha crua:
         # evita decodificar centenas de MB so para descartar a maioria das
         # linhas. So vale para padroes ASCII, que e o caso de busca em log.
+        probe = self.raw_probe_src
         self.raw_bytes = None
         self.raw_bytes_lower = None
-        if raw and raw.isascii():
+        if probe and probe.isascii():
             try:
-                self.raw_bytes = re.compile(raw.encode("ascii"), flags)
+                self.raw_bytes = re.compile(probe.encode("ascii"), flags)
             except re.error:
                 self.raw_bytes = None
             # Buscar sem diferenciar maiusculas custa caro: o motor de regex
@@ -302,15 +313,15 @@ class FilterSpec:
             # os deslocamentos continuam validos.
             # So vale sem barra invertida no padrao: minusculizar trocaria \W
             # por \w e mudaria o sentido.
-            if self.raw_bytes is not None and flags & re.IGNORECASE and "\\" not in raw:
+            if self.raw_bytes is not None and flags & re.IGNORECASE and "\\" not in probe:
                 try:
-                    self.raw_bytes_lower = re.compile(raw.lower().encode("ascii"))
+                    self.raw_bytes_lower = re.compile(probe.lower().encode("ascii"))
                 except re.error:
                     self.raw_bytes_lower = None
 
     @property
     def empty(self):
-        return not (self.levels or self.tag or self.text or self.raw
+        return not (self.levels or self.tag or self.text or self.raw_list
                     or self.pid or self.tid or self.uid)
 
     @property
@@ -329,7 +340,7 @@ class FilterSpec:
             "pid": self.pid.pattern if self.pid else None,
             "tid": self.tid.pattern if self.tid else None,
             "uid": self.uid.pattern if self.uid else None,
-            "raw": self.raw.pattern if self.raw else None,
+            "raw": [r.pattern for r in self.raw_list],
             "negate": self.negate,
             "flags": self.flags,
         }, sort_keys=True)
@@ -339,8 +350,9 @@ class FilterSpec:
         return (not hit) if self.negate else hit
 
     def _raw_match(self, line, parsed):
-        if self.raw is not None and not self.raw.search(line):
-            return False
+        for regex in self.raw_list:
+            if not regex.search(line):
+                return False
         if self.levels:
             if not parsed or parsed["level"] not in self.levels:
                 return False
@@ -482,6 +494,20 @@ def filter_index(path, encoding, log_format, spec):
     if (not needs_parse) and getattr(spec, "raw_bytes", None) is not None and not spec.negate:
         hits, truncated = _scan_raw_bytes(
             path, spec.raw_bytes, MAX_FILTER_HITS, spec.raw_bytes_lower)
+        # Exigir varias palavras na mesma linha ("a&b") nao pode virar um
+        # lookahead na varredura: o motor tentaria casar em cada posicao do
+        # bloco e o custo explodiria. Em vez disso a triagem usa uma palavra e
+        # as demais sao conferidas so nas linhas candidatas, que sao poucas.
+        if len(spec.raw_list) > 1 and hits:
+            rest = [r for r in spec.raw_list if r is not spec.raw]
+            kept = []
+            with open(path, "rb") as f:
+                for line_no, byte_off in hits:
+                    f.seek(byte_off)
+                    line = f.readline().decode(encoding, errors="replace")
+                    if all(r.search(line) for r in rest):
+                        kept.append((line_no, byte_off))
+            hits = kept
         return _filter_cache.put(key, {"hits": hits, "truncated": truncated})
 
     # Filtro composto: faz a triagem nos bytes e so decodifica e parseia as

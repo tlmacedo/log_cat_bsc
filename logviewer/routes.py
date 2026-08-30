@@ -213,7 +213,8 @@ def get_filtered():
             pid=src.get("pid") or None,
             tid=src.get("tid") or None,
             uid=src.get("uid") or None,
-            raw=src.get("raw") or None,
+            # `raw` pode vir repetido: todas as palavras na mesma linha.
+            raw=(src.getlist("raw") if hasattr(src, "getlist") else src.get("raw")) or None,
             negate=str(src.get("negate", "")).lower() == "true",
             case_sensitive=case_sensitive,
         )

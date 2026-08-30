@@ -399,6 +399,32 @@ button.on-toggle { background: var(--accent); color: var(--accent-fg); border-co
   font-size: 11.5px;
 }
 .log-table.wrap { width: 100%; }
+/* Cada celula de largura fixa carrega a largura no proprio conteudo: em tabela
+   de layout automatico, largura no <td> e so uma sugestao. */
+.cell {
+  display: inline-block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: top;
+}
+/* A largura vive no <col>; o span cuida do corte com reticencias. */
+.col-n    { width: var(--w-n); }
+.col-file { width: var(--w-file); }
+.col-lvl  { width: var(--w-lvl); }
+.col-time { width: var(--w-time); }
+.col-pid  { width: var(--w-pid); }
+.col-tid  { width: var(--w-tid); }
+.col-tag  { width: var(--w-tag); }
+
+.cell-n    { width: var(--w-n);    text-align: right; }
+.cell-file { width: var(--w-file); }
+.cell-lvl  { width: var(--w-lvl);  text-align: center; }
+.cell-time { width: var(--w-time); }
+.cell-pid  { width: var(--w-pid); }
+.cell-tid  { width: var(--w-tid);  text-align: right; }
+.cell-tag  { width: var(--w-tag); }
+
 .log-table thead th {
   position: sticky;
   top: 0;
@@ -412,7 +438,20 @@ button.on-toggle { background: var(--accent); color: var(--accent-fg); border-co
   font-size: 11px;
   font-weight: 600;
   white-space: nowrap;
+  position: relative;
 }
+/* Alca de redimensionamento na borda direita do cabecalho. */
+.col-resize {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  width: 7px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 3;
+}
+.col-resize:hover { background: var(--accent); }
+body.resizing-col { cursor: col-resize; user-select: none; }
 .log-table td {
   padding: 1px 6px;
   border-right: 1px solid var(--border-soft);
@@ -748,34 +787,27 @@ mark.hl-7, .hl-chip.hl-7, .hl-swatch.hl-7, .fd-term.hl-7 { background: #fcc2d7; 
 /* O texto dos resultados e selecionavel com o mouse, inclusive atravessando
    varias linhas, para copiar e colar. O numero da linha fica de fora para nao
    sujar o que foi copiado. */
-.fd-list { font-family: var(--mono); font-size: 11.5px; user-select: text; }
+.fd-list { font-family: var(--mono); font-size: 11.5px; user-select: text; overflow-x: auto; }
+/* Os resultados usam a mesma tabela do log: mesmo cabecalho e mesmas larguras
+   de coluna. Nada de display:flex aqui — numa <tr> isso desmancha as colunas e
+   o cabecalho deixa de bater com o corpo. */
+.fd-table { font-size: 11.5px; }
+.fd-table thead th { top: 0; }
 /* O cursor de texto sinaliza que o clique simples serve para selecionar; a
    navegacao e no duplo clique. */
-.fd-row { display: flex; gap: 8px; padding: 1px 8px; cursor: text; white-space: pre; }
-.fd-txt, .log-table td.c-text { user-select: text; }
-.fd-row:hover { background: var(--bg-hover); }
-.fd-row.on { background: var(--row-selected); color: var(--row-selected-fg); }
-.fd-n { color: var(--fg-dim); min-width: 78px; text-align: right; user-select: none; }
-.fd-row.on .fd-n, .fd-row.on .fd-tag, .fd-row.on .fd-file { color: inherit; }
-.fd-tag { color: var(--accent); margin-right: 8px; }
-.fd-txt { flex: 1; min-width: 0; }
+tr.fd-row { cursor: text; }
+.log-table td.c-text { user-select: text; }
+tr.fd-row:hover td { background: var(--bg-hover); }
+tr.fd-row.on td { background: var(--row-selected); color: var(--row-selected-fg); }
+tr.fd-row.on .proc-name { color: inherit; }
 .fd-flag { margin-right: 6px; }
 .fd-out { color: var(--fg-dim); font-style: italic; }
 .fd-more, .fd-empty { padding: 6px 10px; color: var(--fg-dim); font-family: system-ui, sans-serif; font-size: 11px; }
-.fd-file {
-  color: var(--accent);
-  min-width: 150px;
-  max-width: 150px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex: 0 0 auto;
-}
+td.c-file { color: var(--accent); }
 
 /* ---- Marca de nivel: pinta a linha em vez de esconder as outras ---- */
-tr.lvl-mark td.c-n, .fd-row.lvl-mark .fd-n { position: relative; }
-tr.lvl-mark, .fd-row.lvl-mark { box-shadow: inset 3px 0 0 var(--mark-color); }
-tr.lvl-mark td, .fd-row.lvl-mark { background: color-mix(in srgb, var(--mark-color) 13%, transparent); }
+tr.lvl-mark { box-shadow: inset 3px 0 0 var(--mark-color); }
+tr.lvl-mark td { background: color-mix(in srgb, var(--mark-color) 13%, transparent); }
 tr.selected.lvl-mark td { background: var(--row-selected); }
 .mk-V { --mark-color: #6b7280; }
 .mk-D { --mark-color: #2563eb; }
@@ -785,7 +817,7 @@ tr.selected.lvl-mark td { background: var(--row-selected); }
 .mk-F, .mk-A { --mark-color: #7f1d1d; }
 
 /* Linha escolhida para exportar. */
-tr.is-marked td.c-n, .fd-row.is-marked .fd-n {
+tr.is-marked td.c-n {
   background: var(--row-bookmark);
   font-weight: 700;
 }
