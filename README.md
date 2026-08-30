@@ -43,6 +43,22 @@ Para parar: `docker compose down` (ou `./scripts/stop.sh`).
 Os caminhos aparecem como `/logs/...` na interface porque e assim que o
 container os enxerga. O conteudo e o da sua pasta.
 
+### Como o app trata os seus logs
+
+O app **aponta para a sua pasta e le no lugar**. Nenhum arquivo de log e
+copiado, movido ou apagado: eles continuam sendo seus, onde sempre estiveram, e
+a montagem e somente leitura. Nao ha nada para o app limpar depois.
+
+A consequencia e que ele so enxerga o que foi montado na inicializacao. Para
+analisar outra pasta, rode o script de novo apontando para ela:
+
+```bash
+./scripts/start-mac.sh /outro/caminho/logs
+```
+
+A unica pasta que o app mantem por conta propria e `capturas/`, com o que ele
+mesmo baixou dos aparelhos USB. Essa voce pode apagar quando quiser.
+
 ### Aparelhos USB
 
 O Docker Desktop no macOS e no Windows roda numa maquina virtual que **nao
