@@ -139,9 +139,16 @@
       </header>
       <div class="dialog-form">
         <label>Nome <input id="fdName" placeholder="ex: Telecom e sbrowser na ativacao"></label>
-        <p class="dialog-hint">O filtro casa a linha se <strong>qualquer</strong> um dos nos
-        casar. Dentro de um no, os campos preenchidos precisam casar todos.
-        Em PID vale o numero ou o nome do processo (ex: <code>sbrowser</code>).</p>
+        <p class="dialog-hint">
+        <strong>Dentro de um no</strong> tudo e exigido junto: a linha precisa ter a TAG, o
+        PID e o que mais estiver preenchido, <em>e</em> as palavras-chave. TAG, PID e TID
+        casam pelo <strong>valor exato</strong> (use <code>a|b</code> para mais de um). Em PID
+        vale o numero ou o nome do processo, ex: <code>sbrowser</code>.<br>
+        <strong>As palavras-chave</strong> sao procuradas no texto da mensagem quando o no
+        define TAG/PID/TID/nivel; num no so de palavras, na linha inteira. Entre elas,
+        <code>|</code> e ou e <code>&amp;</code> e e.<br>
+        <strong>Entre nos</strong> os resultados se somam: cada no filtra por conta e a secao
+        mostra a soma.</p>
         <div id="fdNodes" class="fd-nodes"></div>
         <button id="fdAddNode" type="button">+ Adicionar no</button>
         <label class="dialog-check"><input type="checkbox" id="fdCase"> Diferenciar maiusculas/minusculas</label>

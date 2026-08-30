@@ -276,7 +276,12 @@ class FilterSpec:
         self.levels = set(levels or ())
         self.negate = bool(negate)
         self.tag = re.compile(tag, flags) if tag else None
-        self.text = re.compile(text, flags) if text else None
+        # `text` procura so na mensagem do logcat, e tambem aceita lista: varias
+        # palavras exigidas na mesma linha.
+        text_list = [text] if isinstance(text, str) else list(text or ())
+        text_list = [t for t in text_list if t]
+        self.text_list = [re.compile(t, flags) for t in text_list]
+        self.text = self.text_list[0] if self.text_list else None
         self.pid = re.compile(pid, flags) if pid else None
         self.tid = re.compile(tid, flags) if tid else None
         self.uid = re.compile(uid, flags) if uid else None
@@ -321,7 +326,7 @@ class FilterSpec:
 
     @property
     def empty(self):
-        return not (self.levels or self.tag or self.text or self.raw_list
+        return not (self.levels or self.tag or self.text_list or self.raw_list
                     or self.pid or self.tid or self.uid)
 
     @property
@@ -330,13 +335,13 @@ class FilterSpec:
         que e o maior custo da varredura, ainda mais em arquivo de formato misto
         onde cada linha tenta os nove padroes antes de desistir."""
         return bool(self.levels or self.tag or self.pid
-                    or self.tid or self.uid or self.text)
+                    or self.tid or self.uid or self.text_list)
 
     def cache_key(self):
         return json.dumps({
             "levels": sorted(self.levels),
             "tag": self.tag.pattern if self.tag else None,
-            "text": self.text.pattern if self.text else None,
+            "text": [t.pattern for t in self.text_list],
             "pid": self.pid.pattern if self.pid else None,
             "tid": self.tid.pattern if self.tid else None,
             "uid": self.uid.pattern if self.uid else None,
@@ -362,11 +367,12 @@ class FilterSpec:
                 continue
             if not parsed or not regex.search(parsed[field] or ""):
                 return False
-        if self.text is not None:
+        if self.text_list:
             # Sem parse (cabecalho de bugreport, dumpsys) o texto e a linha toda.
             subject = (parsed["msg"] if parsed else line) or ""
-            if not self.text.search(subject):
-                return False
+            for regex in self.text_list:
+                if not regex.search(subject):
+                    return False
         return True
 
 

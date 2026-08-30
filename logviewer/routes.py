@@ -209,7 +209,8 @@ def get_filtered():
         return analysis.FilterSpec(
             levels=levels or None,
             tag=src.get("tag") or None,
-            text=src.get("text") or None,
+            # `text` tambem pode vir repetido, como `raw`.
+            text=(src.getlist("text") if hasattr(src, "getlist") else src.get("text")) or None,
             pid=src.get("pid") or None,
             tid=src.get("tid") or None,
             uid=src.get("uid") or None,

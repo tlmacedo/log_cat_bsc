@@ -1192,7 +1192,7 @@ function fileSearchParams(tab, query) {
   // Cada `raw` e uma exigencia: a linha precisa casar com todas. O servidor
   // usa a mais longa para triar e confere as outras so nas candidatas.
   for (const r of bare) params.append("raw", r);
-  if (byField.tag.length) params.set("tag", byField.tag.join("|"));
+  if (byField.tag.length) params.set("tag", exactPattern(byField.tag.join("|")));
   if (byField.msg.length) params.set("text", byField.msg.join("|"));
   if (byField.pid.length) params.set("pid", byField.pid.join("|"));
   if (byField.tid.length) params.set("tid", byField.tid.join("|"));
@@ -2423,21 +2423,43 @@ function renderFilterList() {
   }
 }
 
+/** Valor de campo casa exatamente, nao por pedaco: quem escreve
+ *  tag:TelephonyDataSource quer aquela TAG, nao qualquer uma que a contenha.
+ *  Continua aceitando "a|b" para varios valores, e um padrao com sintaxe de
+ *  regex e respeitado como o autor escreveu. */
+function exactPattern(value) {
+  if (/[\\^$.*+?()[\]{}]/.test(value)) return value;
+  const parts = value.split("|").map((v) => v.trim()).filter(Boolean);
+  if (!parts.length) return value;
+  return `^(?:${parts.join("|")})$`;
+}
+
 /** Converte os nos do filtro no payload que /api/filtered espera, resolvendo
- *  nomes de processo em PIDs. */
+ *  nomes de processo em PIDs.
+ *
+ *  Dentro de um no tudo e E: os campos preenchidos precisam casar todos. As
+ *  palavras-chave procuram no texto da mensagem quando o no tambem define
+ *  TAG/PID/TID/nivel — senao "TAG Telecom com a palavra Telecom" casaria pela
+ *  propria coluna TAG. Num no so de palavras-chave elas valem para a linha
+ *  inteira, que e o unico jeito de alcancar as linhas que nem sao logcat.
+ *  Entre nos e OU: cada no filtra por conta e os resultados se somam. */
 function filterGroups(tab, f) {
   const groups = [];
   let unresolved = null;
   for (const node of filterNodes(f)) {
     const g = {};
-    if (node.tag) g.tag = node.tag;
-    if (node.text) g.raw = splitAndOr(node.text).groups;
-    if (node.tid) g.tid = node.tid;
+    if (node.tag) g.tag = exactPattern(node.tag);
+    if (node.tid) g.tid = exactPattern(node.tid);
     if (node.levels && node.levels.length) g.levels = node.levels.join(",");
     if (node.pid) {
       const r = resolvePid(tab, node.pid);
       if (!r.pattern) { unresolved = node.pid; continue; }
       g.pid = r.pattern;
+    }
+    if (node.text) {
+      const words = splitAndOr(node.text).groups;
+      if (Object.keys(g).length) g.text = words;   // com campo definido: so a mensagem
+      else g.raw = words;                          // no de palavras: a linha toda
     }
     if (Object.keys(g).length) groups.push(g);
   }
@@ -2524,7 +2546,7 @@ function renderFilterNodes() {
   const box = el("#fdNodes");
   box.innerHTML = fdNodes.map((node, i) => `
     <fieldset class="fd-node" data-i="${i}">
-      <legend>No ${i + 1}${i ? " &mdash; <em>ou</em>" : ""}
+      <legend>No ${i + 1}${i ? " &mdash; <em>somado ao anterior</em>" : ""}
         ${fdNodes.length > 1 ? '<button type="button" class="fd-node-del" title="Remover este no">&times;</button>' : ""}
       </legend>
       <div class="dialog-row">
@@ -2533,7 +2555,7 @@ function renderFilterNodes() {
         <label>TID <input data-f="tid" value="${escapeHtml(node.tid || "")}" placeholder="ex: 8144"></label>
       </div>
       <label>Palavras-chave <input data-f="text" value="${escapeHtml(node.text || "")}"
-        placeholder="ex: sales_code|carrierid|imei"></label>
+        placeholder="ex: getSimOperatorMccMnc|mccmnc|plmn  (| = ou, &amp; = e)"></label>
       <div class="dialog-row">
         <span class="dialog-label">Niveis</span>
         <div class="level-toggles" data-f="levels">
