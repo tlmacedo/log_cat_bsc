@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Log Viewer",
+  "productName": "Log Viewer BSC",
   "version": "0.1.0",
   "identifier": "com.sidia.logviewer.desktop",
   "build": {

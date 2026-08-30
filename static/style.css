@@ -102,6 +102,19 @@ button.on-toggle { background: var(--accent); color: var(--accent-fg); border-co
   border-bottom: 1px solid var(--border);
   flex: 0 0 auto;
 }
+#brand {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-right: 6px;
+  margin-right: 2px;
+  border-right: 1px solid var(--border);
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+#brand img { display: block; border-radius: 5px; }
+.brand-name { font-size: 12.5px; color: var(--fg-dim); font-weight: 500; letter-spacing: .2px; }
+.brand-name b { color: var(--fg); font-weight: 700; }
 #rootInput { flex: 0 1 520px; }
 .topbar-spacer { flex: 1; }
 #status { color: var(--fg-dim); font-size: 11px; }
