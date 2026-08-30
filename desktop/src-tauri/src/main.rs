@@ -96,7 +96,7 @@ fn main() {
         .setup(move |app| {
             let url = format!("http://127.0.0.1:{port}/");
             WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url.parse().unwrap()))
-                .title("Log Viewer")
+                .title("Log Viewer BSC")
                 .inner_size(1400.0, 900.0)
                 .build()?;
             Ok(())

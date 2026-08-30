@@ -2,12 +2,20 @@
 <html lang="pt-br" data-theme="light">
 <head>
 <meta charset="utf-8">
-<title>Log Viewer</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%231a6dcc'/%3E%3Cg fill='%23fff'%3E%3Crect x='3' y='4' width='4' height='1.6'/%3E%3Crect x='8' y='4' width='5' height='1.6'/%3E%3Crect x='3' y='7.2' width='6' height='1.6'/%3E%3Crect x='3' y='10.4' width='3' height='1.6'/%3E%3Crect x='7' y='10.4' width='6' height='1.6'/%3E%3C/g%3E%3C/svg%3E">
+<title>Log Viewer BSC</title>
+<link rel="icon" href="favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="icons/favicon-16.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="512x512" href="icons/icon-512.png">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <div id="topbar">
+    <span id="brand" title="Log Viewer BSC">
+      <img src="icons/favicon-32.png" alt="" width="20" height="20">
+      <span class="brand-name">Log Viewer <b>BSC</b></span>
+    </span>
     <input id="rootInput" placeholder="Caminho da pasta de logs, ex: /Seu_Path/log_cat_bsc/log">
     <button id="browseBtn" title="Procurar a pasta com os logs">&#128193; Procurar...</button>
     <button id="loadBtn">Carregar pasta</button>
@@ -39,6 +47,10 @@
       </div>
 
       <section class="side-pane active" data-pane="files">
+        <div class="side-toolbar">
+          <button id="addEntryBtn" title="Adicionar um arquivo ou pasta de qualquer lugar aos arquivos do projeto">&#10133; Adicionar</button>
+          <span class="side-hint file-drop-hint">ou arraste um arquivo/pasta aqui</span>
+        </div>
         <div id="tree"></div>
       </section>
 
@@ -132,7 +144,7 @@
   <div id="browseDialog" class="dialog-backdrop" hidden>
     <div class="dialog dialog-narrow">
       <header>
-        <strong>Escolher a pasta com os logs</strong>
+        <strong id="browseTitle">Escolher a pasta com os logs</strong>
         <button id="browseClose" class="icon-btn">&times;</button>
       </header>
       <div class="browse-body">

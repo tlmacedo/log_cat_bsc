@@ -174,11 +174,28 @@ el("#sidebarResize").addEventListener("mousedown", (e) => {
 
 const browseDialog = el("#browseDialog");
 let browsePathAtual = "";
+// "root": escolher a pasta principal (#rootInput), como sempre.
+// "add-entry": adicionar um arquivo OU pasta aos arquivos do projeto — o
+// navegador nunca revela o caminho real de algo escolhido pelo usuario, entao
+// mesmo pra "adicionar" precisa ser o servidor navegando (mesma razao de
+// /api/browse existir).
+let browseMode = "root";
 
 el("#browseBtn").addEventListener("click", () => {
+  browseMode = "root";
+  el("#browseTitle").textContent = "Escolher a pasta com os logs";
+  el("#browsePick").textContent = "Usar esta pasta";
   const atual = el("#rootInput").value.trim();
   browseDialog.hidden = false;
   openBrowse(atual || (state.config && state.config.default_root) || "");
+});
+
+el("#addEntryBtn").addEventListener("click", () => {
+  browseMode = "add-entry";
+  el("#browseTitle").textContent = "Adicionar arquivo ou pasta aos arquivos do projeto";
+  el("#browsePick").textContent = "Adicionar esta pasta";
+  browseDialog.hidden = false;
+  openBrowse(state.root || (state.config && state.config.default_root) || "");
 });
 
 const fecharBrowse = () => { browseDialog.hidden = true; };
@@ -196,8 +213,12 @@ el("#browsePath").addEventListener("keydown", (e) => {
 el("#browsePick").addEventListener("click", () => {
   if (!browsePathAtual) return;
   fecharBrowse();
-  el("#rootInput").value = browsePathAtual;
-  loadRoot();
+  if (browseMode === "add-entry") {
+    addProjectEntry(browsePathAtual, true);
+  } else {
+    el("#rootInput").value = browsePathAtual;
+    loadRoot();
+  }
 });
 
 let browseParent = null;
@@ -218,12 +239,22 @@ async function openBrowse(path) {
     el("#browsePath").value = data.path;
     el("#browseUp").disabled = !data.parent;
 
-    lista.innerHTML = data.dirs.length
-      ? data.dirs.map((d) =>
-          `<li class="browse-dir" data-path="${escapeHtml(d.path)}">` +
-          `\u{1F4C1} ${escapeHtml(d.name)}</li>`).join("") +
-        (data.truncated ? '<li class="browse-empty">(lista truncada)</li>' : "")
-      : '<li class="browse-empty">Nenhuma subpasta aqui.</li>';
+    const dirsHtml = data.dirs.map((d) =>
+      `<li class="browse-dir" data-path="${escapeHtml(d.path)}">` +
+      `\u{1F4C1} ${escapeHtml(d.name)}</li>`).join("");
+    // No modo de adicionar, arquivos tambem aparecem e sao escolhiveis um a
+    // um — no modo de escolher a pasta raiz eles nao interessam.
+    const filesHtml = browseMode === "add-entry" && data.file_list
+      ? data.file_list.map((f) =>
+          `<li class="browse-file" data-path="${escapeHtml(f.path)}" title="Adicionar este arquivo">` +
+          `\u{1F4C4} ${escapeHtml(f.name)}</li>`).join("")
+      : "";
+    const semNada = browseMode === "add-entry"
+      ? !dirsHtml && !filesHtml
+      : !dirsHtml;
+    lista.innerHTML = dirsHtml + filesHtml +
+      (data.truncated ? '<li class="browse-empty">(lista truncada)</li>' : "") +
+      (semNada ? `<li class="browse-empty">${browseMode === "add-entry" ? "Pasta vazia." : "Nenhuma subpasta aqui."}</li>` : "");
 
     // O numero de arquivos ajuda a reconhecer a pasta certa sem entrar nela.
     el("#browseInfo").textContent = data.files
@@ -233,6 +264,12 @@ async function openBrowse(path) {
 
     lista.querySelectorAll(".browse-dir").forEach((li) => {
       li.addEventListener("click", () => openBrowse(li.dataset.path));
+    });
+    lista.querySelectorAll(".browse-file").forEach((li) => {
+      li.addEventListener("click", () => {
+        fecharBrowse();
+        addProjectEntry(li.dataset.path, false);
+      });
     });
 
     if (data.shortcuts) {
@@ -292,38 +329,73 @@ async function loadRoot() {
     setRootDevice(null);
   }
   setStatus("Carregando arvore...");
-  treeEl.innerHTML = "";
+  const data = await fetchTreeEntries(root);
+  if (data.error) {
+    // Dentro do container so existe o que foi montado; dizer isso evita o
+    // usuario ficar procurando um caminho do host que nunca vai aparecer.
+    const dica = state.config && state.config.in_container
+      ? ` O app esta rodando em container e so enxerga a pasta montada` +
+        `${state.config.default_root ? " (" + state.config.default_root + ")" : ""}.`
+      : "";
+    setStatus(data.error + dica, true);
+    return false;
+  }
+  // So guarda o caminho depois de saber que ele funciona: guardar antes fazia
+  // um caminho invalido voltar a cada recarga da pagina.
+  persist(ROOT_KEY, root);
+  state.rootEntries = data.entries;
+  renderFilesPane();
+  setStatus(`${data.entries.length} itens` +
+    (data.truncated ? ` (truncado em ${data.max_entries})` : ""));
+  return true;
+}
+
+async function fetchTreeEntries(root) {
   try {
     const res = await fetch(`/api/tree?root=${encodeURIComponent(root)}`);
     const data = await res.json();
-    if (!res.ok) {
-      // Dentro do container so existe o que foi montado; dizer isso evita o
-      // usuario ficar procurando um caminho do host que nunca vai aparecer.
-      const dica = state.config && state.config.in_container
-        ? ` O app esta rodando em container e so enxerga a pasta montada` +
-          `${state.config.default_root ? " (" + state.config.default_root + ")" : ""}.`
-        : "";
-      setStatus((data.error || "Erro ao carregar pasta") + dica, true);
-      return false;
-    }
-    // So guarda o caminho depois de saber que ele funciona: guardar antes fazia
-    // um caminho invalido voltar a cada recarga da pagina.
-    persist(ROOT_KEY, root);
-    renderTree(data.entries);
-    setStatus(`${data.entries.length} itens` +
-      (data.truncated ? ` (truncado em ${data.max_entries})` : ""));
-    return true;
+    if (!res.ok) return { error: data.error || "Erro ao carregar pasta" };
+    return data;
   } catch (err) {
-    setStatus("Falha na requisicao: " + err, true);
-    return false;
+    return { error: "Falha na requisicao: " + err };
   }
 }
 
-function renderTree(entries) {
-  const root = { children: new Map(), is_dir: true, path: "" };
+/** Junta uma raiz absoluta com um caminho relativo que o /api/tree devolveu
+ *  (relativo pode vir vazio, para a propria raiz). */
+function joinPath(root, rel) {
+  if (!rel) return root;
+  return root.replace(/\/+$/, "") + "/" + rel;
+}
+
+function pathBasename(p) {
+  const i = p.replace(/\/+$/, "").lastIndexOf("/");
+  return i === -1 ? p : p.slice(i + 1);
+}
+
+function pathDirname(p) {
+  const i = p.lastIndexOf("/");
+  return i <= 0 ? "/" : p.slice(0, i);
+}
+
+/** Um caminho (arquivo ou pasta, em qualquer raiz) foi removido dos arquivos
+ *  do projeto: some da barra lateral sem tocar em nada no disco. */
+function isHidden(absPath) {
+  for (const h of state.hiddenPaths) {
+    if (absPath === h || absPath.startsWith(h + "/")) return true;
+  }
+  return false;
+}
+
+/** Monta o modelo em arvore (pastas/arquivos aninhados) a partir da lista
+ *  achatada que o /api/tree devolve para uma raiz, pulando o que foi
+ *  removido dos arquivos do projeto. */
+function buildTreeModel(root, entries) {
+  const rootNode = { children: new Map(), is_dir: true, path: "" };
   for (const entry of entries) {
+    if (isHidden(joinPath(root, entry.path))) continue;
     const parts = entry.path.split("/");
-    let node = root;
+    let node = rootNode;
     for (let i = 0; i < parts.length; i++) {
       const last = i === parts.length - 1;
       const key = parts[i];
@@ -339,11 +411,97 @@ function renderTree(entries) {
       node = node.children.get(key);
     }
   }
-  treeEl.innerHTML = "";
-  renderNode(root, treeEl);
+  return rootNode;
 }
 
-function renderNode(node, container) {
+/** Redesenha a aba "Arquivos" inteira: a arvore da pasta raiz principal (se
+ *  houver) seguida de cada item extra fixado nos arquivos do projeto — cada
+ *  um com a sua propria raiz, podendo estar em qualquer lugar do disco. */
+function renderFilesPane() {
+  treeEl.innerHTML = "";
+  if (state.root && state.rootEntries) {
+    const model = buildTreeModel(state.root, state.rootEntries);
+    renderNode(model, treeEl, { root: state.root });
+  }
+  for (const entryItem of state.projectEntries) {
+    treeEl.appendChild(renderProjectEntryRow(entryItem));
+  }
+  if (!state.root && !state.projectEntries.length) {
+    treeEl.innerHTML = '<p class="side-hint">Carregue uma pasta ou adicione um arquivo/pasta ' +
+      'aos arquivos do projeto.</p>';
+  }
+}
+
+const REMOVE_BTN_HTML =
+  '<button class="entry-remove" tabindex="-1" ' +
+  'title="Remover dos arquivos do projeto (nao apaga do disco)">&times;</button>';
+
+/** Clique no "x" ou tecla Delete/Backspace com a linha focada removem o item
+ *  — sempre so da lista de exibicao, nunca do disco. */
+function wireRemove(row, onRemove) {
+  row.querySelector(".entry-remove").addEventListener("click", (e) => {
+    e.stopPropagation();
+    onRemove();
+  });
+  row.addEventListener("keydown", (e) => {
+    if (e.key === "Delete" || e.key === "Backspace") {
+      e.preventDefault();
+      onRemove();
+    }
+  });
+}
+
+/** Um item de `state.projectEntries`: sua propria linha de topo (com raiz
+ *  independente), removivel por inteiro. Pastas carregam a arvore so quando
+ *  expandidas pela primeira vez. */
+function renderProjectEntryRow(entryItem) {
+  const wrap = document.createElement("div");
+  const name = pathBasename(entryItem.path) || entryItem.path;
+  const row = document.createElement("div");
+  row.className = "entry project-entry " + (entryItem.is_dir ? "dir" : "file text");
+  row.tabIndex = 0;
+  row.title = entryItem.path;
+
+  const childContainer = document.createElement("div");
+  if (entryItem.is_dir) {
+    childContainer.style.display = "none";
+    childContainer.style.paddingLeft = "14px";
+  }
+
+  const label = () => (entryItem.is_dir
+    ? (childContainer.style.display !== "none" ? "▾ " : "▸ ")
+    : "") + `\u{1F4CC} ${escapeHtml(name)}`;
+  row.innerHTML = `<span class="entry-label">${label()}</span>` + REMOVE_BTN_HTML;
+
+  row.addEventListener("click", async (e) => {
+    if (e.target.closest(".entry-remove")) return;
+    if (!entryItem.is_dir) {
+      openFile(pathDirname(entryItem.path), pathBasename(entryItem.path));
+      return;
+    }
+    const open = childContainer.style.display !== "none";
+    childContainer.style.display = open ? "none" : "block";
+    row.querySelector(".entry-label").innerHTML = label();
+    if (!open && childContainer.childElementCount === 0) {
+      childContainer.innerHTML = '<p class="side-hint">Carregando...</p>';
+      const data = await fetchTreeEntries(entryItem.path);
+      if (data.error) {
+        childContainer.innerHTML = `<p class="side-hint">${escapeHtml(data.error)}</p>`;
+        return;
+      }
+      childContainer.innerHTML = "";
+      const model = buildTreeModel(entryItem.path, data.entries);
+      renderNode(model, childContainer, { root: entryItem.path });
+    }
+  });
+  wireRemove(row, () => removeProjectEntry(entryItem.path));
+
+  wrap.appendChild(row);
+  if (entryItem.is_dir) wrap.appendChild(childContainer);
+  return wrap;
+}
+
+function renderNode(node, container, ctx) {
   const dirs = [];
   const files = [];
   for (const child of node.children.values()) {
@@ -355,18 +513,22 @@ function renderNode(node, container) {
   for (const dir of dirs) {
     const row = document.createElement("div");
     row.className = "entry dir";
-    row.textContent = "▸ " + dir.name;
+    row.tabIndex = 0;
+    const label = (open) => (open ? "▾ " : "▸ ") + escapeHtml(dir.name);
+    row.innerHTML = `<span class="entry-label">${label(false)}</span>` + REMOVE_BTN_HTML;
     const childContainer = document.createElement("div");
     childContainer.style.display = "none";
     childContainer.style.paddingLeft = "14px";
-    row.addEventListener("click", () => {
+    row.addEventListener("click", (e) => {
+      if (e.target.closest(".entry-remove")) return;
       const open = childContainer.style.display !== "none";
       childContainer.style.display = open ? "none" : "block";
-      row.textContent = (open ? "▸ " : "▾ ") + dir.name;
+      row.querySelector(".entry-label").innerHTML = label(!open);
       if (!open && childContainer.childElementCount === 0) {
-        renderNode(dir, childContainer);
+        renderNode(dir, childContainer, ctx);
       }
     });
+    wireRemove(row, () => hidePath(joinPath(ctx.root, dir.path)));
     container.appendChild(row);
     container.appendChild(childContainer);
   }
@@ -375,19 +537,175 @@ function renderNode(node, container) {
     const row = document.createElement("div");
     const isText = file.meta && file.meta.likely_text !== false;
     row.className = "entry file " + (isText ? "text" : "binary");
-    row.innerHTML = `${escapeHtml(file.name)} <span class="size">${fmtSize(file.meta ? file.meta.size : null)}</span>`;
-    row.addEventListener("click", () => openFile(file.path));
+    row.tabIndex = 0;
+    row.innerHTML =
+      `<span class="entry-label">${escapeHtml(file.name)} <span class="size">${fmtSize(file.meta ? file.meta.size : null)}</span></span>` +
+      REMOVE_BTN_HTML;
+    row.addEventListener("click", (e) => {
+      if (e.target.closest(".entry-remove")) return;
+      openFile(ctx.root, file.path);
+    });
+    wireRemove(row, () => hidePath(joinPath(ctx.root, file.path)));
     container.appendChild(row);
   }
 }
 
 // ---------------------------------------------------------------------------
+// Arquivos do projeto: itens extras fixados na barra lateral (podem estar em
+// qualquer lugar do disco) e caminhos removidos da exibicao. Compartilhados
+// entre web/Mac/Windows via o backend (o mesmo motivo do FILTERS_KEY).
+// ---------------------------------------------------------------------------
+
+const PROJECT_ENTRIES_KEY = "logviewer.projectEntries";
+const HIDDEN_PATHS_KEY = "logviewer.hiddenPaths";
+state.projectEntries = store(PROJECT_ENTRIES_KEY, []);
+state.hiddenPaths = new Set(store(HIDDEN_PATHS_KEY, []));
+
+async function syncProjectEntries() {
+  persist(PROJECT_ENTRIES_KEY, state.projectEntries);
+  try {
+    const res = await fetch("/api/project_entries", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(state.projectEntries),
+    });
+    if (res.ok) {
+      // O servidor decide arquivo/pasta pelo que existe de verdade no disco
+      // (util quando quem chamou nao tinha certeza, como um item arrastado).
+      const data = await res.json();
+      if (Array.isArray(data.entries)) {
+        state.projectEntries = data.entries;
+        persist(PROJECT_ENTRIES_KEY, state.projectEntries);
+        renderFilesPane();
+      }
+    }
+  } catch { /* sem servidor: continua valendo localmente */ }
+}
+
+async function syncHiddenPaths() {
+  persist(HIDDEN_PATHS_KEY, [...state.hiddenPaths]);
+  try {
+    await fetch("/api/hidden_paths", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify([...state.hiddenPaths]),
+    });
+  } catch { /* sem servidor: continua valendo localmente */ }
+}
+
+async function loadProjectPrefsFromServer() {
+  try {
+    const [entriesRes, hiddenRes] = await Promise.all([
+      fetch("/api/project_entries"), fetch("/api/hidden_paths"),
+    ]);
+    if (entriesRes.ok) {
+      const data = await entriesRes.json();
+      if (Array.isArray(data.entries)) state.projectEntries = data.entries;
+    }
+    if (hiddenRes.ok) {
+      const data = await hiddenRes.json();
+      if (Array.isArray(data.paths)) state.hiddenPaths = new Set(data.paths);
+    }
+    persist(PROJECT_ENTRIES_KEY, state.projectEntries);
+    persist(HIDDEN_PATHS_KEY, [...state.hiddenPaths]);
+    renderFilesPane();
+  } catch { /* offline: segue com o cache local */ }
+}
+loadProjectPrefsFromServer();
+
+function addProjectEntry(path, isDir) {
+  if (state.projectEntries.some((e) => e.path === path)) {
+    setStatus("Esse item ja esta nos arquivos do projeto.");
+    return;
+  }
+  // Reaparecer depois de ter sido removido e o comportamento esperado de
+  // "adicionar de novo", entao desfaz uma remocao anterior deste mesmo item.
+  state.hiddenPaths.delete(path);
+  state.projectEntries.push({ path, is_dir: isDir });
+  syncProjectEntries();
+  syncHiddenPaths();
+  renderFilesPane();
+  setStatus(`Adicionado aos arquivos do projeto: ${path}`);
+}
+
+function removeProjectEntry(path) {
+  state.projectEntries = state.projectEntries.filter((e) => e.path !== path);
+  syncProjectEntries();
+  renderFilesPane();
+  setStatus("Removido dos arquivos do projeto (o arquivo/pasta continua no disco).");
+}
+
+function hidePath(absPath) {
+  state.hiddenPaths.add(absPath);
+  syncHiddenPaths();
+  renderFilesPane();
+  setStatus("Removido dos arquivos do projeto (o arquivo/pasta continua no disco).");
+}
+
+// ---------------------------------------------------------------------------
+// Arrastar um arquivo/pasta do sistema operacional para a barra lateral.
+//
+// Um navegador comum nunca entrega o caminho absoluto de um arquivo
+// arrastado do Finder/Explorer (removido de todo navegador por seguranca ha
+// anos) — so da pra ler o CONTEUDO dele, o que exigiria copiar o arquivo pro
+// servidor, contrariando o resto do app (que sempre le em vez de copiar). O
+// app desktop (Tauri) e diferente: a janela nativa recebe o caminho de
+// verdade, entao o drag-and-drop funciona igual ao que foi pedido; no
+// navegador comum, tentamos o caminho quando o proprio navegador o expoe (js
+// so sabe depois de tentar) e, se nao vier, apontamos pro botao "Adicionar"
+// — mesmo resultado final, um clique a mais.
+// ---------------------------------------------------------------------------
+
+const filesPaneEl = document.querySelector('.side-pane[data-pane="files"]');
+
+if (filesPaneEl) {
+  filesPaneEl.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    filesPaneEl.classList.add("drag-over");
+  });
+  filesPaneEl.addEventListener("dragleave", (e) => {
+    if (!filesPaneEl.contains(e.relatedTarget)) filesPaneEl.classList.remove("drag-over");
+  });
+  filesPaneEl.addEventListener("drop", (e) => {
+    e.preventDefault();
+    filesPaneEl.classList.remove("drag-over");
+    const paths = [...(e.dataTransfer?.files || [])].map((f) => f.path).filter(Boolean);
+    if (!paths.length) {
+      setStatus('Este navegador nao entrega o caminho real do arquivo arrastado. ' +
+        'Use o botao "Adicionar" para escolher pelo servidor.', true);
+      return;
+    }
+    for (const p of paths) addProjectEntry(p, undefined);
+  });
+}
+
+/** No app desktop (Tauri) a janela nativa avisa o drag-and-drop com o
+ *  caminho de verdade — ligado sob demanda em wireTauriDragDrop() (chamado
+ *  la embaixo, so quando o runtime do Tauri esta presente). */
+async function wireTauriDragDrop() {
+  const tauri = window.__TAURI__;
+  if (!tauri?.window) return;
+  try {
+    const win = tauri.window.getCurrentWindow();
+    await win.onDragDropEvent((event) => {
+      if (event.payload.type !== "drop") return;
+      for (const p of event.payload.paths || []) addProjectEntry(p, undefined);
+    });
+  } catch { /* versao do Tauri sem esse evento: so o botao "Adicionar" mesmo */ }
+}
+wireTauriDragDrop();
+
+// ---------------------------------------------------------------------------
 // Abas de arquivo
 // ---------------------------------------------------------------------------
 
-function newTab(path) {
+function newTab(root, path) {
   return {
     id: "t" + Date.now() + Math.random().toString(36).slice(2, 6),
+    // Cada aba lembra a propria raiz: com arquivos do projeto adicionados de
+    // qualquer lugar do disco, nao existe mais uma unica raiz global valendo
+    // pra tudo (so a pasta carregada em #rootInput tem esse papel hoje).
+    root,
     path,
     lines: [],
     mode: "range",
@@ -410,6 +728,9 @@ function newTab(path) {
     highlightPids: new Set(),
     liveFilter: "",
     activeFilterIds: new Set(),
+    // Palavras-chave desligadas temporariamente na aba de filtros salvos
+    // (clique no chip colorido). Nao mexe no filtro salvo em si.
+    disabledFilterTerms: new Set(),
     wrapText: false,
     // Estado de interacao.
     selected: new Set(),
@@ -452,10 +773,10 @@ function newTab(path) {
   };
 }
 
-function openFile(path, jumpLine) {
-  let tab = state.tabs.find((t) => t.path === path);
+function openFile(root, path, jumpLine) {
+  let tab = state.tabs.find((t) => t.root === root && t.path === path);
   if (!tab) {
-    tab = newTab(path);
+    tab = newTab(root, path);
     state.tabs.push(tab);
     // O arquivo recem-aberto assume o painel em foco.
     state.panes[state.focusedPane] = tab.id;
@@ -590,7 +911,7 @@ function syncPanesToTime(sourceTab, line) {
 async function loadFileContent(tab, { tail = false, offset = 0, limit = null, scrollToLine = null } = {}) {
   const effectiveLimit = limit || tab.limit;
   const params = new URLSearchParams({
-    root: state.root,
+    root: tab.root || state.root,
     file: tab.path,
     limit: effectiveLimit,
   });
@@ -725,7 +1046,12 @@ function scrollLogToLine(tab, lineNumber, paneIndex) {
     for (const panel of panelsEl.querySelectorAll(selector)) {
       const wrap = panel.querySelector(".log-wrap");
       if (!wrap) continue;
-      let target = panel.querySelector(`tr[data-line="${lineNumber}"]`);
+      // A busca do alvo tem que ficar dentro de `wrap`: o painel tambem
+      // contem a janela de resultados, cujas linhas usam o mesmo atributo
+      // data-line — procurando em `panel` inteiro um duplo clique podia achar
+      // a propria linha clicada no dock e rolar o log por um valor sem
+      // relacao nenhuma com a posicao real dela no arquivo.
+      let target = wrap.querySelector(`tr[data-line="${lineNumber}"]`);
       // Na janela virtual a linha pode estar fora do slice desenhado; pula
       // direto para a posicao pelo indice (altura fixa de linha) e reconcilia
       // o slice antes de procurar de novo.
@@ -736,7 +1062,7 @@ function scrollLogToLine(tab, lineNumber, paneIndex) {
           wrap.scrollTop = Math.max(0, idx * ROW_H - wrap.clientHeight / 2 + ROW_H / 2);
           updateVirtualSlice(wrap, tab);
           setTimeout(() => { suppressScrollHide = false; }, 0);
-          target = panel.querySelector(`tr[data-line="${lineNumber}"]`);
+          target = wrap.querySelector(`tr[data-line="${lineNumber}"]`);
         }
       }
       if (!target) continue;
@@ -1300,7 +1626,7 @@ function buildPanel(tab, paneIndex) {
     ${paneSelect}
     <input class="live-filter" list="filterHistoryList" value="${escapeHtml(tab.liveFilter)}"
       placeholder="Buscar no arquivo todo (Enter). Ex: sales_code|imei|serialno"
-      title="Enter busca no ARQUIVO INTEIRO e abre a janela de resultados.&#10;&#10;created for   = a frase inteira, com o espaco&#10;created|for   = uma ou outra&#10;created&amp;for   = as duas na mesma linha&#10;&#10;tag:X pid:Y   = filtra o campo (na busca comum o campo casa por conter)&#10;                e as palavras vao no texto da mensagem&#10;Prefixos: tag: pid: tid: uid: app: level:&#10;Cada palavra ganha sua cor. Aceita regex.">
+      title="Enter busca no ARQUIVO INTEIRO e abre a janela de resultados.&#10;&#10;created for   = a frase inteira, com o espaco&#10;created|for   = uma ou outra&#10;created&amp;for   = as duas na mesma linha&#10;&#10;tag:X pid:Y   = filtra o campo (na busca comum o campo casa por conter)&#10;                e as palavras vao no texto da mensagem&#10;Prefixos: tag: pid: tid: uid: app: level:&#10;&#10;tag:A|tag:B|C = varias flags e palavras soltas juntas, sem espaco:&#10;                TAG exata A, OU TAG exata B, OU a palavra C na linha&#10;                (| = ou, &amp; = e — mesmo mecanismo do filtro salvo&#10;                com varios nos, so que numa linha so)&#10;Cada palavra ganha sua cor. Aceita regex.">
     <select data-act="scope" title="Onde procurar">
       <option value="current"${(tab.findScope || "current") === "current" ? " selected" : ""}>neste arquivo</option>
       <option value="open"${tab.findScope === "open" ? " selected" : ""}>arquivos abertos</option>
@@ -1477,7 +1803,7 @@ const MAX_SECTIONS = 12;
  *  nenhum, viram `raw` e valem para a linha inteira — unico jeito de alcancar
  *  as linhas que nem sao logcat. */
 function fileSearchParams(tab, query) {
-  const params = new URLSearchParams({ root: state.root, file: tab.path });
+  const params = new URLSearchParams({ root: tab.root || state.root, file: tab.path });
   const { fields, keywords } = parseQuery(query, tab);
   const byField = { tag: [], msg: [], pid: [], tid: [], uid: [], level: [] };
   let negated = 0;
@@ -1528,10 +1854,16 @@ function focusSearchBox(scope) {
 
 /** Busca com escopo em varios arquivos, reaproveitando /api/search. */
 async function searchAcrossFiles(tab, query, scope) {
-  const params = new URLSearchParams({ root: state.root, pattern: query });
+  const root = tab.root || state.root;
+  const params = new URLSearchParams({ root, pattern: query });
   if (scope === "open") {
     params.set("scope", "open");
-    params.set("open_files", state.tabs.map((t) => t.path).join(","));
+    // So as abas da MESMA raiz: o backend resolve caminho relativo a uma
+    // raiz so, e com arquivos do projeto de qualquer lugar do disco as abas
+    // podem pertencer a raizes diferentes.
+    params.set("open_files", state.tabs
+      .filter((t) => (t.root || state.root) === root)
+      .map((t) => t.path).join(","));
   } else {
     params.set("scope", "folder");
     params.set("max_files", 300);
@@ -1574,6 +1906,23 @@ async function runSearch(tab, query, { sectionId = null, offset = 0, groups = nu
   if (!query) {
     setStatus("Digite algo na caixa de busca.", true);
     return;
+  }
+  // "tag:A|tag:B|C" na propria caixa: mesma logica dos nos de um filtro
+  // salvo (flag = campo exato, palavra solta = texto/linha, "|"=ou "&"=e),
+  // so que escrita numa linha em vez de num dialogo.
+  if (!groups && isFlaggedExpr(query)) {
+    const r = buildFlaggedGroups(tab, query);
+    if (!r.groups.length) {
+      setStatus(r.unresolved.length
+        ? `Nenhum processo casa com ${r.unresolved.join(", ")}.`
+        : "Consulta vazia.", true);
+      return;
+    }
+    if (r.unresolved.length) {
+      setStatus(`Ignorando (processo nao encontrado): ${r.unresolved.join(", ")}`, true);
+    }
+    groups = r.groups;
+    if (!colorSource) colorSource = r.colorSource;
   }
   // Um filtro com nos sempre vale no arquivo atual: os nos falam de TAG/PID
   // deste log.
@@ -1624,7 +1973,7 @@ async function runSearch(tab, query, { sectionId = null, offset = 0, groups = nu
     if (scope === "current") {
       let params, hasCriteria = true, unresolved = null;
       if (section.groups) {
-        params = new URLSearchParams({ root: state.root, file: tab.path });
+        params = new URLSearchParams({ root: tab.root || state.root, file: tab.path });
         params.set("groups", JSON.stringify(section.groups));
       } else {
         ({ params, hasCriteria, unresolved } = fileSearchParams(tab, query));
@@ -1719,7 +2068,22 @@ const FIELD_LABEL = {
   tag: "TAG", pid: "PID", tid: "TID", uid: "UID", msg: "TEXTO", level: "NIVEL",
 };
 
-function chipsHtml(section) {
+/** Palavra desligada temporariamente numa secao com grupos (clique no chip):
+ *  a secao dos filtros salvos guarda isso na aba (sobrevive a recriacao da
+ *  secao quando outro filtro e ligado/desligado); qualquer outra secao com
+ *  grupos (a busca com flags tag:/pid:/... na propria caixa) guarda no
+ *  proprio objeto da secao, que nesse caso nunca e recriado por fora. */
+function getDisabledTerms(tab, section) {
+  if (section.id === SAVED_SECTION_ID) return tab.disabledFilterTerms;
+  if (!section.disabledTerms) section.disabledTerms = new Set();
+  return section.disabledTerms;
+}
+
+/** As palavras de uma secao com grupos podem ser desligadas por um clique
+ *  (feature ao lado de baixo, em buildSection): o chip fica sem cor e o
+ *  filtro passa a ignorar aquela palavra, ate que ela seja clicada de novo —
+ *  sem precisar refazer a busca na mao. */
+function chipsHtml(section, tab) {
   const chips = [];
   if (section.savedNames) {
     chips.push('<span class="fd-term fd-term-flag">FILTROS SALVOS</span>');
@@ -1727,12 +2091,21 @@ function chipsHtml(section) {
       chips.push(`<span class="fd-term fd-term-plain">${escapeHtml(name)}</span>`);
     }
   }
+  const toggleable = !!section.groups;
+  const disabledTerms = toggleable ? getDisabledTerms(tab, section) : null;
   for (const t of section.terms) {
     const flag = t.field && FIELD_LABEL[t.field]
       ? `<b class="fd-fieldflag">${FIELD_LABEL[t.field]}</b>`
       : "";
-    const title = t.note ? ` title="${escapeHtml(t.note)}"` : "";
-    chips.push(`<span class="fd-term hl-${t.color}"${title}>` +
+    const canToggle = toggleable;
+    const off = canToggle && disabledTerms.has(t.label);
+    const cls = "fd-term" + (off ? " fd-term-off" : ` hl-${t.color}`) + (canToggle ? " fd-term-toggle" : "");
+    const dataTerm = canToggle ? ` data-term="${escapeHtml(t.label)}"` : "";
+    const hint = canToggle
+      ? (off ? "Clique para religar esta palavra no filtro" : "Clique para desligar esta palavra do filtro")
+      : t.note;
+    const title = hint ? ` title="${escapeHtml(hint)}"` : "";
+    chips.push(`<span class="${cls}"${title}${dataTerm}>` +
       `${flag}${escapeHtml(t.label ?? t.pattern)}</span>`);
   }
   return chips.join("");
@@ -1817,7 +2190,7 @@ function buildSection(tab, section) {
   box.innerHTML =
     `<header class="fd-sec-head">` +
       `<button class="fd-toggle" title="Colapsar/expandir">${section.collapsed ? "▸" : "▾"}</button>` +
-      `<span class="fd-chips">${chipsHtml(section)}</span>` +
+      `<span class="fd-chips">${chipsHtml(section, tab)}</span>` +
       `<span class="fd-origin" title="${escapeHtml(origem + aparelho)}">` +
         `${escapeHtml(origem)}${escapeHtml(aparelho)}</span>` +
       `<span class="fd-count${section.error ? " fd-err" : ""}">${escapeHtml(count)}</span>` +
@@ -1853,6 +2226,7 @@ function buildSection(tab, section) {
     if (section.id === SAVED_SECTION_ID) {
       // Fechar a secao dos filtros salvos e o mesmo que desligar todos.
       tab.activeFilterIds.clear();
+      tab.disabledFilterTerms.clear();
       syncSavedFilters(tab);
       return;
     }
@@ -1861,6 +2235,9 @@ function buildSection(tab, section) {
   });
   box.querySelector(".fd-export").addEventListener("change", (e) => {
     section.exportChecked = e.target.checked;
+  });
+  box.querySelectorAll(".fd-term-toggle").forEach((chip) => {
+    chip.addEventListener("click", () => toggleSectionTerm(tab, section, chip.dataset.term));
   });
   box.querySelectorAll(".fd-page").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -1973,6 +2350,7 @@ function buildFindDock(tab) {
   dock.querySelector('[data-fd="clear"]').addEventListener("click", () => {
     tab.findSections = [];
     tab.activeFilterIds.clear();
+    tab.disabledFilterTerms.clear();
     renderFilterList();
     refreshPanel(tab);
   });
@@ -2005,8 +2383,8 @@ function openAtLine(tab, line, file) {
       findHeight: tab.findHeight, liveFilter: tab.liveFilter,
       colorCursor: tab.colorCursor,
     };
-    openFile(file, line);
-    const opened = state.tabs.find((t) => t.path === file);
+    openFile(tab.root, file, line);
+    const opened = state.tabs.find((t) => t.root === tab.root && t.path === file);
     if (opened) {
       Object.assign(opened, carry);
       opened.filterTerms = activeTerms(opened);
@@ -2036,7 +2414,7 @@ async function exportChecked(tab) {
     if (section.scope === "current" && section.results.matched > lines.length) {
       let params;
       if (section.groups) {
-        params = new URLSearchParams({ root: state.root, file: tab.path });
+        params = new URLSearchParams({ root: tab.root || state.root, file: tab.path });
         params.set("groups", JSON.stringify(section.groups));
       } else {
         ({ params } = fileSearchParams(tab, section.query));
@@ -2311,6 +2689,7 @@ function resetFilters(tab) {
   tab.highlightPids.clear();
   tab.liveFilter = "";
   tab.activeFilterIds.clear();
+  tab.disabledFilterTerms.clear();
   tab.searchTerm = "";
   tab.timeRange = null;
   recomputeSearch(tab);
@@ -2520,19 +2899,32 @@ const deviceInfoEl = el("#deviceInfo");
 let deviceReport = null;
 
 function scopeParams(scope) {
-  const params = new URLSearchParams({ root: state.root });
   if (scope === "current") {
     const tab = activeTab();
     if (!tab) return null;
+    const params = new URLSearchParams({ root: tab.root || state.root });
     params.set("scope", "explicit");
     params.set("files", tab.path);
-  } else if (scope === "open") {
-    if (!state.tabs.length) return null;
-    params.set("scope", "open");
-    params.set("open_files", state.tabs.map((t) => t.path).join(","));
-  } else {
-    params.set("scope", "folder");
+    return params;
   }
+  if (scope === "open") {
+    const tab = activeTab();
+    if (!tab || !state.tabs.length) return null;
+    const root = tab.root || state.root;
+    const params = new URLSearchParams({ root });
+    params.set("scope", "open");
+    // So as abas da mesma raiz da aba ativa: /api/device_info resolve
+    // caminho relativo a uma raiz so.
+    params.set("open_files", state.tabs
+      .filter((t) => (t.root || state.root) === root)
+      .map((t) => t.path).join(","));
+    return params;
+  }
+  // "folder" sempre varre a pasta raiz principal (#rootInput), nao os
+  // arquivos do projeto adicionados de fora dela.
+  if (!state.root) return null;
+  const params = new URLSearchParams({ root: state.root });
+  params.set("scope", "folder");
   return params;
 }
 
@@ -2548,14 +2940,16 @@ el("#deviceCopyBtn").addEventListener("click", () => {
 el("#deviceSearch").addEventListener("input", () => renderDeviceInfo());
 
 async function scanDevice() {
-  if (!state.root) {
-    deviceInfoEl.innerHTML = '<p class="side-hint">Carregue uma pasta primeiro.</p>';
+  if (!state.root && !state.tabs.length) {
+    deviceInfoEl.innerHTML = '<p class="side-hint">Carregue uma pasta ou abra um arquivo primeiro.</p>';
     return;
   }
   const scope = el("#deviceScope").value;
   const params = scopeParams(scope);
   if (!params) {
-    deviceInfoEl.innerHTML = '<p class="side-hint">Abra um arquivo de log primeiro.</p>';
+    deviceInfoEl.innerHTML = scope === "folder"
+      ? '<p class="side-hint">Carregue uma pasta primeiro (a varredura por pasta so olha a raiz principal).</p>'
+      : '<p class="side-hint">Abra um arquivo de log primeiro.</p>';
     return;
   }
   const btn = el("#deviceScanBtn");
@@ -2896,7 +3290,7 @@ async function abrirAoVivo(live) {
   await loadRoot();
   // Sem trocar de aba: os controles de pausar e parar ficam nesta, e escondê-los
   // logo depois de iniciar a coleta deixaria o usuario sem como interromper.
-  openFile(live.file.split("/").pop());
+  openFile(state.root, live.file.split("/").pop());
   const tab = activeTab();
   if (tab) {
     // Numa coleta ao vivo o que interessa e a linha que acabou de chegar.
@@ -2956,13 +3350,48 @@ async function captureUsb(btn, serial) {
 // ---------------------------------------------------------------------------
 
 const FILTERS_KEY = "logviewer.savedFilters";
+// O localStorage e so um cache local pra pintar a tela na hora; ele fica
+// preso a cada origem/webview, entao web e desktop (mesmo backend, mesmo
+// arquivo) apareceriam com filtros diferentes se fosse a unica fonte. O
+// arquivo no servidor (/api/saved_filters) e quem manda de verdade.
 state.savedFilters = store(FILTERS_KEY, []);
 
 const filterListEl = el("#filterList");
 const filterDialog = el("#filterDialog");
 
+async function syncFiltersToServer() {
+  try {
+    await fetch("/api/saved_filters", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(state.savedFilters),
+    });
+  } catch { /* sem servidor: os filtros continuam validos localmente */ }
+}
+
+async function loadSavedFiltersFromServer() {
+  try {
+    const res = await fetch("/api/saved_filters");
+    if (!res.ok) return;
+    const data = await res.json();
+    if (!Array.isArray(data.filters)) return;
+    if (data.filters.length) {
+      state.savedFilters = data.filters;
+      persist(FILTERS_KEY, state.savedFilters);
+      renderFilterList();
+    } else if (state.savedFilters.length) {
+      // Servidor ainda sem nada (primeira vez com esta versao) mas ja existem
+      // filtros no localStorage de uma versao anterior: migra pra virarem a
+      // fonte compartilhada, em vez de sumirem da tela.
+      await syncFiltersToServer();
+    }
+  } catch { /* offline: segue com o que tem no cache local */ }
+}
+loadSavedFiltersFromServer();
+
 function saveFilters() {
   persist(FILTERS_KEY, state.savedFilters);
+  syncFiltersToServer();
   renderFilterList();
 }
 
@@ -3013,6 +3442,133 @@ function renderFilterList() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Consulta com flags de campo misturadas com palavras soltas na propria
+// caixa de busca: "tag:A|tag:B|C" == uma TAG A OU uma TAG B OU a palavra C em
+// qualquer lugar da linha. "&" em vez de "|" exige as duas coisas juntas.
+// Mesmo mecanismo do filtro salvo com varios nos (flag = campo exato, palavra
+// solta = texto), so que expandido a partir de uma linha so em vez de nos
+// separados no dialogo.
+// ---------------------------------------------------------------------------
+
+const FIELD_REVERSE = { tag: "tag:", pid: "pid:", tid: "tid:", uid: "uid:", msg: "text:", level: "level:" };
+/** So entra nesse mecanismo quando a consulta e uma expressao sem espaco
+ *  (senao nao da pra saber se o espaco e "e" ou frase literal) com pelo menos
+ *  uma flag depois de separar por "|"/"&". Sem flag nenhuma, "|" e "&" ja
+ *  funcionam do jeito de sempre (palavra-chave simples). */
+function isFlaggedExpr(query) {
+  const q = query.trim();
+  if (/\s/.test(q) || !/[|&]/.test(q)) return false;
+  return q.split(/[|&]/).some((p) => FIELD_TOKEN.test(p.trim()));
+}
+
+/** Um pedaco isolado (ja sem "|"/"&") vira {field, value}. Sem flag
+ *  reconhecida, o pedaco inteiro e a palavra a procurar. */
+function parseFlagLeaf(piece) {
+  const trimmed = piece.trim();
+  const m = trimmed.match(/^(pid|app|tag|uid|text|msg|level|lvl):(.*)$/i);
+  if (m && m[2]) return { field: FIELD_PREFIXES[m[1].toLowerCase() + ":"], value: m[2].trim() };
+  return { field: null, value: trimmed };
+}
+
+/** "&" separa exigencias (todas precisam valer); dentro de cada uma, "|"
+ *  separa alternativas (uma so precisa valer) — igual a splitAndOr, so que
+ *  cada alternativa carrega a flag de campo que tiver. */
+function parseFlagExpr(expr) {
+  const andGroups = expr.includes("&") ? expr.split("&") : [expr];
+  return andGroups
+    .map((g) => g.split("|").map(parseFlagLeaf).filter((l) => l.value))
+    .filter((g) => g.length);
+}
+
+/** Dentro de uma exigencia (um grupo de "|"), separa as alternativas por
+ *  campo: quem tem flag filtra aquele campo primeiro (varios valores da
+ *  mesma flag = OU entre eles); as palavras soltas so entram DEPOIS, so no
+ *  que sobrou daquele campo. A flag manda — nunca vira mais uma alternativa
+ *  solta do texto. */
+function clauseToFragment(clause) {
+  const frag = { tag: [], pid: [], tid: [], levels: [], words: [] };
+  for (const leaf of clause) {
+    if (leaf.field === "tag") frag.tag.push(leaf.value);
+    else if (leaf.field === "pid") frag.pid.push(leaf.value);
+    else if (leaf.field === "tid") frag.tid.push(leaf.value);
+    else if (leaf.field === "level") frag.levels.push(...leaf.value.split(",").map((v) => v.trim()).filter(Boolean));
+    else frag.words.push(leaf.value);
+  }
+  return frag;
+}
+
+/** Junta todas as exigencias ("&") num no so no formato que /api/filtered
+ *  entende — mesma regra do no de um filtro salvo: os campos (tag/pid/tid/
+ *  nivel) sao um E entre si, e as palavras soltas de cada exigencia so valem
+ *  dentro do que os campos ja filtraram (E), mas entre elas mesmas (dentro da
+ *  mesma exigencia) e OU. */
+function buildFlaggedGroup(tab, andGroups) {
+  const tagVals = [], tidVals = [], pidVals = [], levels = [];
+  const textEntries = [];
+  for (const clause of andGroups) {
+    const frag = clauseToFragment(clause);
+    tagVals.push(...frag.tag);
+    pidVals.push(...frag.pid);
+    tidVals.push(...frag.tid);
+    levels.push(...frag.levels);
+    if (frag.words.length) textEntries.push(frag.words.join("|"));
+  }
+  const g = {};
+  if (tagVals.length) g.tag = exactPattern(tagVals.join("|"));
+  if (tidVals.length) g.tid = exactPattern(tidVals.join("|"));
+  if (levels.length) g.levels = levels.join(",");
+  let unresolved = null;
+  if (pidVals.length) {
+    const r = resolvePid(tab, pidVals.join("|"));
+    if (!r.pattern) unresolved = pidVals.join("|");
+    else g.pid = r.pattern;
+  }
+  if (textEntries.length) {
+    if (Object.keys(g).length) g.text = textEntries;   // teve flag: so a mensagem, dentro do campo ja filtrado
+    else g.raw = textEntries;                          // sem flag nenhuma: a linha toda
+  }
+  return { group: Object.keys(g).length ? g : null, unresolved };
+}
+
+/** As palavras coloridas da secao: uma por alternativa distinta, na ordem em
+ *  que apareceram. Reconstitui uma consulta no formato antigo (campo: com
+ *  espaco, palavras soltas coladas com "|") so pra reaproveitar o mesmo
+ *  parseQuery/termsOf que ja sabe colorir cada uma com sua etiqueta. */
+function colorSourceFromLeaves(andGroups) {
+  const seen = new Set();
+  const fieldParts = [];
+  const words = [];
+  for (const group of andGroups) {
+    for (const leaf of group) {
+      const key = (leaf.field || "") + ":" + leaf.value;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const prefix = leaf.field && FIELD_REVERSE[leaf.field];
+      if (prefix) fieldParts.push(`${prefix}${leaf.value}`);
+      else words.push(leaf.value);
+    }
+  }
+  if (words.length) fieldParts.push(words.join("|"));
+  return fieldParts.join(" ");
+}
+
+/** Ponto de entrada: de uma consulta como "tag:A|tag:B|C" monta os grupos
+ *  (OU) prontos pra /api/filtered e a fonte de cor dos chips. `disabledTerms`
+ *  tira alternativas desligadas por clique num chip antes de montar os
+ *  grupos, sem mexer na consulta nem nas cores originais. */
+function buildFlaggedGroups(tab, query, disabledTerms) {
+  let andGroups = parseFlagExpr(query.trim());
+  const colorSource = colorSourceFromLeaves(andGroups);
+  if (disabledTerms && disabledTerms.size) {
+    andGroups = andGroups
+      .map((g) => g.filter((leaf) => !disabledTerms.has(leaf.value)))
+      .filter((g) => g.length);
+  }
+  const { group, unresolved } = buildFlaggedGroup(tab, andGroups);
+  return { groups: group ? [group] : [], unresolved: unresolved ? [unresolved] : [], colorSource };
+}
+
 /** Valor de campo casa exatamente, nao por pedaco: quem escreve
  *  tag:TelephonyDataSource quer aquela TAG, nao qualquer uma que a contenha.
  *  Continua aceitando "a|b" para varios valores, e um padrao com sintaxe de
@@ -3024,6 +3580,18 @@ function exactPattern(value) {
   return `^(?:${parts.join("|")})$`;
 }
 
+/** Tira do texto de palavras-chave as que estao desligadas (clique no chip),
+ *  preservando a gramatica de "|"/"&". Um grupo de E que fica vazio some
+ *  inteiro, para nao virar uma exigencia vazia. */
+function removeDisabledWords(text, disabledTerms) {
+  if (!text || !disabledTerms || !disabledTerms.size) return text;
+  const { groups } = splitAndOr(text);
+  return groups
+    .map((g) => g.split("|").map((w) => w.trim()).filter((w) => w && !disabledTerms.has(w)).join("|"))
+    .filter(Boolean)
+    .join("&");
+}
+
 /** Converte os nos do filtro no payload que /api/filtered espera, resolvendo
  *  nomes de processo em PIDs.
  *
@@ -3033,7 +3601,7 @@ function exactPattern(value) {
  *  propria coluna TAG. Num no so de palavras-chave elas valem para a linha
  *  inteira, que e o unico jeito de alcancar as linhas que nem sao logcat.
  *  Entre nos e OU: cada no filtra por conta e os resultados se somam. */
-function filterGroups(tab, f) {
+function filterGroups(tab, f, disabledTerms) {
   const groups = [];
   let unresolved = null;
   for (const node of filterNodes(f)) {
@@ -3046,8 +3614,9 @@ function filterGroups(tab, f) {
       if (!r.pattern) { unresolved = node.pid; continue; }
       g.pid = r.pattern;
     }
-    if (node.text) {
-      const words = splitAndOr(node.text).groups;
+    const text = removeDisabledWords(node.text, disabledTerms);
+    if (text) {
+      const words = splitAndOr(text).groups;
       if (Object.keys(g).length) g.text = words;   // com campo definido: so a mensagem
       else g.raw = words;                          // no de palavras: a linha toda
     }
@@ -3093,7 +3662,7 @@ function syncSavedFilters(tab) {
   const groups = [];
   const unresolved = [];
   for (const f of filters) {
-    const r = filterGroups(tab, f);
+    const r = filterGroups(tab, f, tab.disabledFilterTerms);
     groups.push(...r.groups);
     if (r.unresolved) unresolved.push(`${f.name}: "${r.unresolved}"`);
   }
@@ -3117,6 +3686,42 @@ function syncSavedFilters(tab) {
   runSearch(tab, names.join(" + "), {
     groups, id: SAVED_SECTION_ID, savedNames: names, colorSource,
   });
+}
+
+/** Liga/desliga uma palavra-chave da aba de filtros salvos (clique no chip
+ *  colorido). So recalcula os grupos enviados ao servidor — as etiquetas e
+ *  cores da secao (section.terms) ficam paradas, para a cor voltar igual
+ *  quando a palavra e religada. */
+/** Liga/desliga uma palavra de qualquer secao com grupos (clique no chip):
+ *  filtros salvos ativos ou uma busca com flags tag:/pid:/... na propria
+ *  caixa. So refaz a busca com os grupos recalculados — os chips e as cores
+ *  da secao ficam parados, so muda quem entra no filtro. */
+function toggleSectionTerm(tab, section, term) {
+  const disabled = getDisabledTerms(tab, section);
+  if (disabled.has(term)) disabled.delete(term);
+  else disabled.add(term);
+
+  if (section.id === SAVED_SECTION_ID) {
+    const filters = [...tab.activeFilterIds]
+      .map((id) => state.savedFilters.find((f) => f.id === id))
+      .filter(Boolean);
+    const groups = filters.flatMap((f) => filterGroups(tab, f, disabled).groups);
+    if (!groups.length) {
+      setStatus("Todas as palavras deste filtro estao desligadas.", true);
+      refreshPanel(tab);
+      return;
+    }
+    runSearch(tab, section.query, { sectionId: SAVED_SECTION_ID, groups });
+    return;
+  }
+
+  const r = buildFlaggedGroups(tab, section.query, disabled);
+  if (!r.groups.length) {
+    setStatus("Todas as palavras deste resultado estao desligadas.", true);
+    refreshPanel(tab);
+    return;
+  }
+  runSearch(tab, section.query, { sectionId: section.id, groups: r.groups });
 }
 
 /** Um filtro e uma lista de nos combinados em OU. Filtros antigos, de campo
@@ -3387,7 +3992,7 @@ async function loadTimeline(tab) {
   tab.timelineLoading = true;
   refreshPanel(tab);
   try {
-    const params = new URLSearchParams({ root: state.root, file: tab.path, buckets: 600 });
+    const params = new URLSearchParams({ root: tab.root || state.root, file: tab.path, buckets: 600 });
     const res = await fetch(`/api/timeline?${params}`);
     const data = await res.json();
     if (!res.ok) {
@@ -3509,7 +4114,7 @@ async function loadProcessMap(tab) {
   if (tab.procMap || tab.procLoading) return;
   tab.procLoading = true;
   try {
-    const params = new URLSearchParams({ root: state.root, file: tab.path });
+    const params = new URLSearchParams({ root: tab.root || state.root, file: tab.path });
     const res = await fetch(`/api/process_map?${params}`);
     const data = await res.json();
     if (!res.ok) return;
@@ -3715,12 +4320,15 @@ function exportSession() {
     syncTime: state.syncTime,
     savedFilters: state.savedFilters,
     highlights: state.highlights,
-    // panes guarda o caminho, nao o id: os ids sao recriados ao abrir.
+    // panes guarda raiz+caminho, nao o id: os ids sao recriados ao abrir. A
+    // raiz entra na chave porque dois arquivos do projeto de pastas
+    // diferentes podem ter o mesmo caminho relativo.
     panes: state.panes.slice(0, state.paneCount).map((id) => {
       const t = state.tabs.find((x) => x.id === id);
-      return t ? t.path : null;
+      return t ? { root: t.root, path: t.path } : null;
     }),
     tabs: state.tabs.map((t) => ({
+      root: t.root,
       path: t.path,
       offset: t.offset,
       limit: t.limit,
@@ -3773,8 +4381,9 @@ async function importSession(file) {
   state.tabs = [];
   state.panes = [null, null, null];
   const byPath = new Map();
+  const paneKey = (root, path) => `${root || ""}::${path}`;
   for (const saved of session.tabs) {
-    const tab = newTab(saved.path);
+    const tab = newTab(saved.root || session.root || state.root, saved.path);
     tab.limit = saved.limit || DEFAULT_PAGE_SIZE;
     tab.wrapText = !!saved.wrapText;
     tab.liveFilter = saved.liveFilter || "";
@@ -3789,10 +4398,14 @@ async function importSession(file) {
       for (const v of values || []) tab[key].add(v);
     }
     state.tabs.push(tab);
-    byPath.set(saved.path, tab);
+    byPath.set(paneKey(tab.root, saved.path), tab);
   }
-  (session.panes || []).forEach((path, i) => {
-    const tab = path && byPath.get(path);
+  (session.panes || []).forEach((entry, i) => {
+    if (!entry) return;
+    // Sessoes antigas (v1 sem multi-raiz) guardavam so a string do caminho.
+    const root = typeof entry === "string" ? (session.root || state.root) : entry.root;
+    const path = typeof entry === "string" ? entry : entry.path;
+    const tab = byPath.get(paneKey(root, path));
     if (tab) state.panes[i] = tab.id;
   });
   state.activeTab = state.tabs.length ? (state.panes[0] || state.tabs[0].id) : null;

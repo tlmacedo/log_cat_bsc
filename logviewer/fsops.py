@@ -16,6 +16,14 @@ class PathError(ValueError):
     pass
 
 
+def _posix(path):
+    """Padroniza separador de caminho para '/' nas respostas da API. No
+    Windows nativo (app desktop sem Docker) os.path devolve barra invertida;
+    o frontend so entende '/' (e o Windows aceita as duas formas de volta nas
+    chamadas seguintes, entao normalizar so na saida e suficiente)."""
+    return path.replace(os.sep, "/") if os.sep != "/" else path
+
+
 def resolve_root(root):
     if not root:
         raise PathError("Parametro 'root' e obrigatorio.")
@@ -85,7 +93,7 @@ def browse(path=None):
     if not os.access(path, os.R_OK):
         raise PathError(f"Sem permissao de leitura: {path}")
 
-    dirs, files = [], 0
+    dirs, files = [], []
     try:
         with os.scandir(path) as it:
             for entry in it:
@@ -95,20 +103,27 @@ def browse(path=None):
                     if entry.is_dir(follow_symlinks=False):
                         dirs.append(entry.name)
                     else:
-                        files += 1
+                        st = entry.stat()
+                        files.append((entry.name, st.st_size))
                 except OSError:
                     continue
     except OSError as e:
         raise PathError(f"Nao consegui listar {path}: {e}")
 
     dirs.sort(key=str.lower)
+    files.sort(key=lambda f: f[0].lower())
     parent = os.path.dirname(path)
     return {
-        "path": path,
-        "parent": parent if parent != path else None,
-        "dirs": [{"name": d, "path": os.path.join(path, d)} for d in dirs[:2000]],
-        "files": files,
-        "truncated": len(dirs) > 2000,
+        "path": _posix(path),
+        "parent": _posix(parent) if parent != path else None,
+        "dirs": [{"name": d, "path": _posix(os.path.join(path, d))} for d in dirs[:2000]],
+        "files": len(files),
+        # Nomes de arquivo, ate um teto - usado pelo seletor de "adicionar
+        # arquivo aos arquivos do projeto" (o resumo de contagem acima ja
+        # cobre o caso de so escolher a pasta).
+        "file_list": [{"name": n, "path": _posix(os.path.join(path, n)), "size": s}
+                      for n, s in files[:2000]],
+        "truncated": len(dirs) > 2000 or len(files) > 2000,
     }
 
 
@@ -136,7 +151,7 @@ def list_tree(root):
             except OSError:
                 continue
             entries.append({
-                "path": rel,
+                "path": _posix(rel),
                 "name": name,
                 "is_dir": True,
                 "is_symlink": os.path.islink(full),
@@ -161,7 +176,7 @@ def list_tree(root):
                 continue
             ext = os.path.splitext(name)[1]
             entries.append({
-                "path": rel,
+                "path": _posix(rel),
                 "name": name,
                 "is_dir": False,
                 "is_symlink": os.path.islink(full),
@@ -178,7 +193,7 @@ def list_tree(root):
             break
 
     return {
-        "root": real_root,
+        "root": _posix(real_root),
         "entries": entries,
         "truncated": truncated,
         "max_entries": MAX_TREE_ENTRIES,

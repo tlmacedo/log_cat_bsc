@@ -12,9 +12,17 @@ __pycache__/
 /capturas/
 /.env
 
+# Preferencias compartilhadas (filtros salvos) quando rodado local sem
+# Docker: cada maquina/checkout tem o seu.
+/config/
+
 # Override gerado pelos scripts com as pastas visiveis do host.
 /docker-compose.override.yml
 
 # Build do app desktop (Tauri/Rust) - binarios grandes, cada maquina gera os seus.
 /desktop/src-tauri/target/
 /desktop/src-tauri/gen/
+
+# Saida intermediaria de scripts/gen_logo.py - regeneravel; os PNGs finais que
+# importam ja estao versionados em static/icons/ e desktop/src-tauri/icons/.
+/build/

@@ -33,8 +33,11 @@ mkdir -p "$LOG_DIR" 2>/dev/null || true
 LOG_DIR="$(cd "$LOG_DIR" && pwd)"
 CAPTURE_DIR="$REPO/capturas"
 mkdir -p "$CAPTURE_DIR"
+CONFIG_DIR="$REPO/config"
+mkdir -p "$CONFIG_DIR"
 ok "Logs:     $LOG_DIR  (aparece como /logs no app)"
 ok "Capturas: $CAPTURE_DIR"
+ok "Config:   $CONFIG_DIR  (filtros salvos — mesmo arquivo da versao desktop, se rodada neste Mac)"
 
 # Pastas visiveis para o botao "Procurar...". Cada uma e montada com o MESMO
 # caminho de dentro do container, para que o que voce ve no Finder seja o que o
@@ -93,6 +96,7 @@ fi
 cat > .env <<ENV
 LOG_DIR=$LOG_DIR
 CAPTURE_DIR=$CAPTURE_DIR
+CONFIG_DIR=$CONFIG_DIR
 HOST_PORT=$PORT
 ADB_HOST=$ADB_HOST_VALUE
 ADB_PORT=5037

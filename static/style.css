@@ -102,6 +102,19 @@ button.on-toggle { background: var(--accent); color: var(--accent-fg); border-co
   border-bottom: 1px solid var(--border);
   flex: 0 0 auto;
 }
+#brand {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-right: 6px;
+  margin-right: 2px;
+  border-right: 1px solid var(--border);
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+#brand img { display: block; border-radius: 5px; }
+.brand-name { font-size: 12.5px; color: var(--fg-dim); font-weight: 500; letter-spacing: .2px; }
+.brand-name b { color: var(--fg); font-weight: 700; }
 #rootInput { flex: 0 1 520px; }
 .topbar-spacer { flex: 1; }
 #status { color: var(--fg-dim); font-size: 11px; }
@@ -178,6 +191,12 @@ button.on-toggle { background: var(--accent); color: var(--accent-fg); border-co
 }
 
 /* ---- Arvore de arquivos ---- */
+.file-drop-hint { align-self: center; }
+.side-pane[data-pane="files"].drag-over {
+  outline: 2px dashed var(--accent);
+  outline-offset: -2px;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
 #tree { flex: 1; overflow: auto; padding: 6px; }
 .entry {
   padding: 2px 4px;
@@ -185,11 +204,33 @@ button.on-toggle { background: var(--accent); color: var(--accent-fg); border-co
   white-space: nowrap;
   border-radius: 3px;
   font-size: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
 }
-.entry:hover { background: var(--bg-hover); }
+.entry:hover, .entry:focus { background: var(--bg-hover); outline: none; }
 .entry.dir { font-weight: 600; }
 .entry.file.binary { color: var(--fg-dim); font-style: italic; }
 .entry .size { color: var(--fg-dim); font-size: 10px; margin-left: 6px; }
+.entry-label { overflow: hidden; text-overflow: ellipsis; }
+.entry.project-entry { border-left: 2px solid var(--accent); }
+/* O "x" so aparece perto do mouse/foco - com centenas de linhas, um botao
+   sempre visivel em cada uma vira ruido visual constante. */
+.entry-remove {
+  visibility: hidden;
+  flex: 0 0 auto;
+  border: none;
+  background: transparent;
+  color: var(--fg-dim);
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 3px;
+  cursor: pointer;
+  border-radius: 3px;
+}
+.entry:hover .entry-remove, .entry:focus .entry-remove { visibility: visible; }
+.entry-remove:hover { background: var(--lvl-E); color: #fff; }
 
 /* ---- Aba Dispositivo ---- */
 .device-info { flex: 1; overflow: auto; padding: 0 6px 12px; }
@@ -785,6 +826,16 @@ mark.hl-7, .hl-chip.hl-7, .hl-swatch.hl-7, .fd-term.hl-7 { background: #fcc2d7; 
   font-size: 10.5px;
 }
 .fd-term-plain { background: var(--bg-header); color: var(--fg-dim); }
+.fd-term-toggle { cursor: pointer; }
+/* Palavra desligada temporariamente (clique no chip): sem cor, so o contorno,
+   pra lembrar que ela existe no filtro mas nao esta valendo agora. */
+.fd-term-off {
+  background: none;
+  color: var(--fg-dim);
+  border: 1px dashed var(--border);
+  text-decoration: line-through;
+  opacity: .7;
+}
 /* Bandeira que identifica a secao dos filtros salvos. */
 .fd-term-flag {
   background: var(--accent);

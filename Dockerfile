@@ -24,7 +24,7 @@ ENV PORT=5057 \
     CAPTURE_ROOT=/capturas \
     PYTHONUNBUFFERED=1
 
-RUN mkdir -p /logs /capturas
+RUN mkdir -p /logs /capturas /config
 EXPOSE 5057
 
 # Um worker so, com varias threads: os caches de varredura (linha do tempo,
