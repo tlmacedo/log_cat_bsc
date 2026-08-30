@@ -826,6 +826,16 @@ mark.hl-7, .hl-chip.hl-7, .hl-swatch.hl-7, .fd-term.hl-7 { background: #fcc2d7; 
   font-size: 10.5px;
 }
 .fd-term-plain { background: var(--bg-header); color: var(--fg-dim); }
+.fd-term-toggle { cursor: pointer; }
+/* Palavra desligada temporariamente (clique no chip): sem cor, so o contorno,
+   pra lembrar que ela existe no filtro mas nao esta valendo agora. */
+.fd-term-off {
+  background: none;
+  color: var(--fg-dim);
+  border: 1px dashed var(--border);
+  text-decoration: line-through;
+  opacity: .7;
+}
 /* Bandeira que identifica a secao dos filtros salvos. */
 .fd-term-flag {
   background: var(--accent);
