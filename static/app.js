@@ -162,20 +162,31 @@ const lastRoot = store(ROOT_KEY, "");
 if (lastRoot) el("#rootInput").value = lastRoot;
 
 /** No container a pasta de logs e um volume montado; sem isso o campo abriria
- *  vazio e o usuario teria de adivinhar o caminho de dentro do container. */
-fetch("/api/config").then((r) => r.json()).then((cfg) => {
+ *  vazio e o usuario teria de adivinhar o caminho de dentro do container.
+ *
+ *  A pasta lembrada da sessao anterior pode nao existir no ambiente atual —
+ *  e o caso classico de ter usado o app direto e depois subir o container, em
+ *  que o caminho do host nao existe la dentro. Nesse caso caimos na pasta
+ *  padrao em vez de deixar o erro na tela. */
+fetch("/api/config").then(async (r) => {
+  const cfg = await r.json();
   state.config = cfg;
-  if (!el("#rootInput").value && cfg.default_root) {
-    el("#rootInput").value = cfg.default_root;
-    loadRoot();
+  const salvo = el("#rootInput").value.trim();
+
+  if (salvo && await loadRoot()) return;
+  if (!cfg.default_root || cfg.default_root === salvo) return;
+
+  el("#rootInput").value = cfg.default_root;
+  if (await loadRoot() && salvo) {
+    setStatus(`A pasta "${salvo}" nao existe neste ambiente; abri ${cfg.default_root}.`);
   }
 }).catch(() => { /* sem config o app segue como antes */ });
 
+/** Carrega a arvore da pasta informada. Devolve true se deu certo. */
 async function loadRoot() {
   const root = el("#rootInput").value.trim();
-  if (!root) return;
+  if (!root) return false;
   state.root = root;
-  persist(ROOT_KEY, root);
   // Trocar para uma pasta fora da captura desfaz o vinculo com o aparelho.
   if (state.rootDevice && !(state.rootDeviceBase && root.startsWith(state.rootDeviceBase))) {
     setRootDevice(null);
@@ -186,14 +197,25 @@ async function loadRoot() {
     const res = await fetch(`/api/tree?root=${encodeURIComponent(root)}`);
     const data = await res.json();
     if (!res.ok) {
-      setStatus(data.error || "Erro ao carregar pasta", true);
-      return;
+      // Dentro do container so existe o que foi montado; dizer isso evita o
+      // usuario ficar procurando um caminho do host que nunca vai aparecer.
+      const dica = state.config && state.config.in_container
+        ? ` O app esta rodando em container e so enxerga a pasta montada` +
+          `${state.config.default_root ? " (" + state.config.default_root + ")" : ""}.`
+        : "";
+      setStatus((data.error || "Erro ao carregar pasta") + dica, true);
+      return false;
     }
+    // So guarda o caminho depois de saber que ele funciona: guardar antes fazia
+    // um caminho invalido voltar a cada recarga da pagina.
+    persist(ROOT_KEY, root);
     renderTree(data.entries);
     setStatus(`${data.entries.length} itens` +
       (data.truncated ? ` (truncado em ${data.max_entries})` : ""));
+    return true;
   } catch (err) {
     setStatus("Falha na requisicao: " + err, true);
+    return false;
   }
 }
 
