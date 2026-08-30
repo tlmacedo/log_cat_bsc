@@ -8,7 +8,10 @@
 
 const LEVELS = ["V", "D", "I", "W", "E", "F"];
 const PAGE_SIZES = [500, 2000, 5000, 10000, 20000, 50000, 100000, 200000];
-const DEFAULT_PAGE_SIZE = 2000;
+// Por padrao carrega o maximo de linhas que o backend aceita (MAX_LIMIT em
+// reader.py): menos paginacao para navegar, e a virtualizacao abaixo cuida
+// de manter isso leve no navegador.
+const DEFAULT_PAGE_SIZE = PAGE_SIZES[PAGE_SIZES.length - 1];
 
 // Acima deste numero de linhas visiveis, a tabela vira uma janela virtual:
 // so as linhas dentro (ou perto) da area visivel do painel viram <tr> de
@@ -19,6 +22,10 @@ const DEFAULT_PAGE_SIZE = 2000;
 const ROW_H = 18;
 const VIRTUALIZE_THRESHOLD = 2000;
 const VIRTUALIZE_BUFFER = 60;
+// "Quebrar linha" desliga a virtualizacao (altura da linha deixa de ser fixa),
+// entao com a pagina padrao carregando ate 200.000 linhas ligar esse modo sem
+// limite travaria o navegador com centenas de milhares de <tr> reais.
+const WRAP_SAFE_LIMIT = 20000;
 
 const state = {
   root: "",
@@ -594,6 +601,11 @@ async function loadFileContent(tab, { tail = false, offset = 0, limit = null, sc
   // atualizacao do modo "Seguir".
   const painelAtual = panelsEl.querySelector(`[data-panel-id="${tab.id}"] .log-wrap`);
   const rolagemAnterior = painelAtual ? painelAtual.scrollTop : null;
+  // O mesmo vale para a janela de resultados: duplo clique num item dela so
+  // deve mexer no log, a lista de resultados tem que continuar exatamente
+  // onde estava (sem voltar pro topo a cada salto).
+  const dockScrolls = [...panelsEl.querySelectorAll(`[data-panel-id="${tab.id}"] .fd-sections`)]
+    .map((node) => [node.closest(".panel").dataset.paneIndex, node.scrollTop]);
 
   setStatus("Carregando " + tab.path.split("/").pop() + "...");
   let data;
@@ -643,6 +655,11 @@ async function loadFileContent(tab, { tail = false, offset = 0, limit = null, sc
   tab.hlIdx = null;  // a pagina mudou: a navegacao de destaques recomeca
   recomputeSearch(tab);
   renderPanels();
+  for (const [paneIndex, top] of dockScrolls) {
+    const sections = panelsEl.querySelector(
+      `[data-panel-id="${tab.id}"][data-pane-index="${paneIndex}"] .fd-sections`);
+    if (sections) sections.scrollTop = top;
+  }
   renderHighlightList();
   // O nome do processo por PID e util em toda linha; busca uma vez por arquivo.
   loadProcessMap(tab);
@@ -686,13 +703,18 @@ function restoreScroll(tab, top) {
   });
 }
 
+// Ao pular para uma linha (resultado de busca, evento da linha do tempo),
+// carrega a maior janela possivel em volta dela, com mais folga abaixo do que
+// acima: depois de achar o que procurava, quem le costuma seguir para frente
+// no arquivo, entao vale mais espaco carregado nessa direcao antes de precisar
+// recarregar. A linha em si fica centralizada na tela (ver scrollLogToLine).
+const JUMP_SPAN = PAGE_SIZES[PAGE_SIZES.length - 1];
+const JUMP_ABOVE_RATIO = 0.3;
+
 async function jumpToLine(tab, lineNumber) {
-  // A linha de destino fica no meio, com pelo menos JUMP_CONTEXT linhas de
-  // cada lado: quem vem de um resultado precisa do que veio antes e depois.
-  const span = Math.max(JUMP_CONTEXT * 2 + 1, tab.limit);
-  const offset = Math.max(0, lineNumber - 1 - Math.floor(span / 2));
+  const offset = Math.max(0, lineNumber - 1 - Math.floor(JUMP_SPAN * JUMP_ABOVE_RATIO));
   tab.jumpLine = lineNumber;
-  await loadFileContent(tab, { offset, limit: span, scrollToLine: lineNumber });
+  await loadFileContent(tab, { offset, limit: JUMP_SPAN, scrollToLine: lineNumber });
 }
 
 function scrollLogToLine(tab, lineNumber, paneIndex) {
@@ -1975,10 +1997,6 @@ function buildFindDock(tab) {
   return dock;
 }
 
-/** Abre a linha com folga em volta: centralizada, com ~1.000 linhas de cada
- *  lado, para dar contexto sem precisar navegar. */
-const JUMP_CONTEXT = 1000;
-
 function openAtLine(tab, line, file) {
   if (file && file !== tab.path) {
     // A lista de resultados viaja junto para continuar clicando nos proximos.
@@ -2121,6 +2139,12 @@ function wirePanel(tab, panel, toolbar, wrap, shown, paneIndex) {
     if (tab.autoScroll) scrollToEnd(tab);
   });
   act("wrap").addEventListener("change", (e) => {
+    if (e.target.checked && shown.length > WRAP_SAFE_LIMIT) {
+      e.target.checked = false;
+      setStatus(`Quebrar linha desativado: escolha ate ${fmtNum(WRAP_SAFE_LIMIT)} linhas por pagina ` +
+        "para usar esse modo (ele desliga a virtualizacao da tabela).", true);
+      return;
+    }
     tab.wrapText = e.target.checked;
     refreshPanel(tab);
   });
@@ -2249,10 +2273,14 @@ function refreshPanel(tab) {
   for (const old of targets) {
     const paneIndex = Number(old.dataset.paneIndex);
     const scrollTop = old.querySelector(".log-wrap")?.scrollTop ?? 0;
+    const dockScrollTop = old.querySelector(".fd-sections")?.scrollTop ?? 0;
     const wasFocused = old === focusedPanel;
 
     const fresh = buildPanel(tab, paneIndex);
     old.replaceWith(fresh);
+
+    const dockSections = fresh.querySelector(".fd-sections");
+    if (dockSections && dockScrollTop) dockSections.scrollTop = dockScrollTop;
 
     const wrap = fresh.querySelector(".log-wrap");
     if (wrap && scrollTop) {
@@ -3449,7 +3477,7 @@ function buildTimeline(tab) {
     const bar = e.target.closest(".tl-bar");
     if (!bar) return;
     const line = Number(bar.dataset.line);
-    loadFileContent(tab, { offset: Math.max(0, line - 1), scrollToLine: line });
+    jumpToLine(tab, line);
   });
 
   // Lista compacta dos eventos, para pular direto ao crash.
