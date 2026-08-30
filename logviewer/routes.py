@@ -4,7 +4,7 @@ import re
 
 from flask import Blueprint, jsonify, request
 
-from . import analysis, deviceinfo, devices, glossary
+from . import analysis, deviceinfo, devices, glossary, prefs
 from .fsops import PathError, browse, list_tree, resolve_within_root
 from .logline import scan_fields
 from .reader import cached_format, columns_for, count_lines, detect_encoding, read_file
@@ -283,6 +283,27 @@ def get_config():
         "adb_host": devices.ADB_HOST,
         "in_container": os.path.exists("/.dockerenv"),
     })
+
+
+@api.get("/saved_filters")
+def get_saved_filters():
+    """Filtros salvos, compartilhados entre TODAS as distribuicoes (web, Mac,
+    Windows): ficam num arquivo no backend, nao no localStorage do navegador
+    (que e proprio de cada origem/webview e por isso nao seria o mesmo entre
+    a versao web e a versao desktop, mesmo conversando com o mesmo servidor)."""
+    return jsonify({"filters": prefs.load_saved_filters()})
+
+
+@api.put("/saved_filters")
+def put_saved_filters():
+    body = request.get_json(silent=True)
+    if not isinstance(body, list):
+        return jsonify({"error": "Corpo precisa ser uma lista de filtros."}), 400
+    try:
+        prefs.save_saved_filters(body)
+    except (OSError, ValueError) as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"ok": True, "count": len(body)})
 
 
 @api.get("/usb_devices")

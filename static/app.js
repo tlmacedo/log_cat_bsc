@@ -2961,13 +2961,48 @@ async function captureUsb(btn, serial) {
 // ---------------------------------------------------------------------------
 
 const FILTERS_KEY = "logviewer.savedFilters";
+// O localStorage e so um cache local pra pintar a tela na hora; ele fica
+// preso a cada origem/webview, entao web e desktop (mesmo backend, mesmo
+// arquivo) apareceriam com filtros diferentes se fosse a unica fonte. O
+// arquivo no servidor (/api/saved_filters) e quem manda de verdade.
 state.savedFilters = store(FILTERS_KEY, []);
 
 const filterListEl = el("#filterList");
 const filterDialog = el("#filterDialog");
 
+async function syncFiltersToServer() {
+  try {
+    await fetch("/api/saved_filters", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(state.savedFilters),
+    });
+  } catch { /* sem servidor: os filtros continuam validos localmente */ }
+}
+
+async function loadSavedFiltersFromServer() {
+  try {
+    const res = await fetch("/api/saved_filters");
+    if (!res.ok) return;
+    const data = await res.json();
+    if (!Array.isArray(data.filters)) return;
+    if (data.filters.length) {
+      state.savedFilters = data.filters;
+      persist(FILTERS_KEY, state.savedFilters);
+      renderFilterList();
+    } else if (state.savedFilters.length) {
+      // Servidor ainda sem nada (primeira vez com esta versao) mas ja existem
+      // filtros no localStorage de uma versao anterior: migra pra virarem a
+      // fonte compartilhada, em vez de sumirem da tela.
+      await syncFiltersToServer();
+    }
+  } catch { /* offline: segue com o que tem no cache local */ }
+}
+loadSavedFiltersFromServer();
+
 function saveFilters() {
   persist(FILTERS_KEY, state.savedFilters);
+  syncFiltersToServer();
   renderFilterList();
 }
 
