@@ -226,20 +226,31 @@ button.on-toggle { background: var(--accent); color: var(--accent-fg); border-co
 .filter-list { list-style: none; margin: 0; padding: 4px 6px; overflow: auto; flex: 1; }
 .filter-list li {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 6px;
-  padding: 4px 6px;
+  padding: 5px 6px;
   border-radius: 3px;
   cursor: pointer;
 }
+.filter-body { flex: 1; min-width: 0; }
 .filter-list li:hover { background: var(--bg-hover); }
 .filter-list li.selected { outline: 1px solid var(--accent); outline-offset: -1px; }
 /* Filtro ativo: o botao fica ligado e o conjunto vira uma secao de resultados. */
 .filter-list li.on { background: color-mix(in srgb, var(--accent) 20%, transparent); }
 .filter-list li.on .filter-name { font-weight: 600; }
+.filter-onoff { margin-top: 2px; }
 .filter-onoff { color: var(--accent); font-size: 10px; flex: 0 0 auto; }
-.filter-list .filter-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.filter-list .filter-meta { font-size: 10px; color: var(--fg-dim); }
+/* O nome aparece inteiro, quebrando linha se precisar: e ele que identifica o
+   filtro na lista. O resumo vem abaixo, um no por linha. */
+.filter-list .filter-name { line-height: 1.35; word-break: break-word; }
+.filter-list .filter-meta {
+  font-size: 10.5px;
+  color: var(--fg-dim);
+  font-family: var(--mono);
+  line-height: 1.4;
+  word-break: break-word;
+}
+.filter-ou { color: var(--accent); font-style: normal; font-weight: 600; }
 .filter-list .neg { color: var(--lvl-E); font-weight: 700; }
 
 /* ---- Area de conteudo / abas de arquivo ---- */

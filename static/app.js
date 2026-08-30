@@ -2564,19 +2564,27 @@ function renderFilterList() {
     const on = !!(tab && tab.activeFilterIds.has(f.id));
     const li = document.createElement("li");
     li.className = (on ? "on " : "") + (state.selectedFilterId === f.id ? "selected" : "");
+    // Um no por linha no resumo: espremer tudo numa linha so obrigava a cortar
+    // o nome, que e justamente o que identifica o filtro.
     const nodes = filterNodes(f);
-    const bits = nodes.map((n) => [
-      n.levels && n.levels.length ? n.levels.join("") : "",
-      n.tag ? "tag:" + n.tag : "",
-      n.pid ? "pid:" + n.pid : "",
-      n.tid ? "tid:" + n.tid : "",
-      n.text || "",
-    ].filter(Boolean).join(" ")).join("  ou  ");
+    const resumo = nodes.map((n) => {
+      const campos = [
+        n.tag ? `tag:${n.tag}` : "",
+        n.pid ? `pid:${n.pid}` : "",
+        n.tid ? `tid:${n.tid}` : "",
+        n.levels && n.levels.length ? n.levels.join("") : "",
+      ].filter(Boolean).join(" ");
+      const partes = [campos, n.text].filter(Boolean);
+      return partes.join(" \u00b7 ") || "(vazio)";
+    });
     li.innerHTML =
       `<span class="filter-onoff">${on ? "&#9679;" : "&#9675;"}</span>` +
-      `<span class="filter-name">${escapeHtml(f.name)}</span>` +
-      `<span class="filter-meta">${nodes.length > 1 ? nodes.length + " nos: " : ""}` +
-      `${escapeHtml(bits.slice(0, 40))}</span>`;
+      `<div class="filter-body">` +
+        `<div class="filter-name">${escapeHtml(f.name)}</div>` +
+        resumo.map((linha, i) =>
+          `<div class="filter-meta">${i ? '<em class="filter-ou">ou</em> ' : ""}` +
+          `${escapeHtml(linha)}</div>`).join("") +
+      `</div>`;
     li.title = (on ? "Ativo — clique para desligar" : "Clique para ativar") +
       "\nDuplo clique edita o filtro";
     li.addEventListener("click", () => {
