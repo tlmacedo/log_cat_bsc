@@ -1,0 +1,6 @@
+# Dependencias extras so do wrapper desktop (Tauri). O container Docker usa
+# gunicorn (so Unix) e nao precisa disto; o desktop precisa rodar tambem no
+# Windows, e o Werkzeug de desenvolvimento nao e feito pra isso — waitress e
+# um servidor WSGI puro-Python, multiplataforma, pensado pra esse uso.
+-r requirements.txt
+waitress>=3.0

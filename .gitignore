@@ -14,3 +14,7 @@ __pycache__/
 
 # Override gerado pelos scripts com as pastas visiveis do host.
 /docker-compose.override.yml
+
+# Build do app desktop (Tauri/Rust) - binarios grandes, cada maquina gera os seus.
+/desktop/src-tauri/target/
+/desktop/src-tauri/gen/
