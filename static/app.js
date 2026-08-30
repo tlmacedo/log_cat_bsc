@@ -7,8 +7,18 @@
  */
 
 const LEVELS = ["V", "D", "I", "W", "E", "F"];
-const PAGE_SIZES = [500, 2000, 5000, 10000, 20000, 50000];
+const PAGE_SIZES = [500, 2000, 5000, 10000, 20000, 50000, 100000, 200000];
 const DEFAULT_PAGE_SIZE = 2000;
+
+// Acima deste numero de linhas visiveis, a tabela vira uma janela virtual:
+// so as linhas dentro (ou perto) da area visivel do painel viram <tr> de
+// verdade, e o espaco das demais e reservado por duas linhas "espacadoras"
+// com a altura equivalente. Sem isso, escolher 50.000+ linhas travaria o
+// navegador (centenas de milhares de <tr> no DOM). --row-h no style.css
+// precisa continuar em 18px para essa conta bater.
+const ROW_H = 18;
+const VIRTUALIZE_THRESHOLD = 2000;
+const VIRTUALIZE_BUFFER = 60;
 
 const state = {
   root: "",
@@ -657,6 +667,7 @@ function scrollToEnd(tab) {
       if (!wrap) continue;
       suppressScrollHide = true;
       wrap.scrollTop = wrap.scrollHeight;
+      updateVirtualSlice(wrap, tab);
       setTimeout(() => { suppressScrollHide = false; }, 0);
     }
   });
@@ -669,6 +680,7 @@ function restoreScroll(tab, top) {
       if (!wrap) continue;
       suppressScrollHide = true;
       wrap.scrollTop = top;
+      updateVirtualSlice(wrap, tab);
       setTimeout(() => { suppressScrollHide = false; }, 0);
     }
   });
@@ -689,16 +701,29 @@ function scrollLogToLine(tab, lineNumber, paneIndex) {
       ? `[data-panel-id="${tab.id}"]`
       : `[data-panel-id="${tab.id}"][data-pane-index="${paneIndex}"]`;
     for (const panel of panelsEl.querySelectorAll(selector)) {
-      const target = panel.querySelector(`tr[data-line="${lineNumber}"]`);
+      const wrap = panel.querySelector(".log-wrap");
+      if (!wrap) continue;
+      let target = panel.querySelector(`tr[data-line="${lineNumber}"]`);
+      // Na janela virtual a linha pode estar fora do slice desenhado; pula
+      // direto para a posicao pelo indice (altura fixa de linha) e reconcilia
+      // o slice antes de procurar de novo.
+      if (!target && wrap.dataset.virtual === "1" && wrap._display) {
+        const idx = wrap._display.findIndex((l) => l.n === lineNumber);
+        if (idx >= 0) {
+          suppressScrollHide = true;
+          wrap.scrollTop = Math.max(0, idx * ROW_H - wrap.clientHeight / 2 + ROW_H / 2);
+          updateVirtualSlice(wrap, tab);
+          setTimeout(() => { suppressScrollHide = false; }, 0);
+          target = panel.querySelector(`tr[data-line="${lineNumber}"]`);
+        }
+      }
       if (!target) continue;
       // scrollIntoView rolaria a pagina inteira quando ha varios paineis;
       // ajustar o scrollTop do proprio container mantem os outros parados.
-      const wrap = panel.querySelector(".log-wrap");
-      if (wrap) {
-        suppressScrollHide = true;
-        wrap.scrollTop = target.offsetTop - wrap.clientHeight / 2 + target.offsetHeight / 2;
-        setTimeout(() => { suppressScrollHide = false; }, 0);
-      }
+      suppressScrollHide = true;
+      wrap.scrollTop = target.offsetTop - wrap.clientHeight / 2 + target.offsetHeight / 2;
+      updateVirtualSlice(wrap, tab);
+      setTimeout(() => { suppressScrollHide = false; }, 0);
       target.classList.add("line-pulse");
       setTimeout(() => target.classList.remove("line-pulse"), 900);
     }
@@ -1007,6 +1032,65 @@ function groupTraces(lines) {
   return groups;
 }
 
+/** Linhas realmente desenhaveis: os blocos de trace fechados encolhem a
+ *  um so header, entao a matematica de altura fixa da virtualizacao usa
+ *  esta lista (nao `shown`) para casar com o que a tela mostra de fato. */
+function displayRows(shown, tab) {
+  const groups = groupTraces(shown);
+  const display = [];
+  for (const line of shown) {
+    const g = groups.get(line.n);
+    if (g && !g.head && !tab.openTraces.has(g.group.id)) continue;
+    display.push(line);
+  }
+  return { display, groups };
+}
+
+/** HTML das linhas <tr> entre `start` e `end` de `display`, com uma linha
+ *  espacadora acima e outra abaixo cobrindo a altura do que ficou de fora —
+ *  e o que faz a barra de rolagem continuar representando o arquivo
+ *  inteiro mesmo com so um pedaco no DOM. */
+function renderVirtualRows(display, groups, tab, start, end, total, colCount) {
+  const topH = start * ROW_H;
+  const botH = (total - end) * ROW_H;
+  let html = "";
+  if (topH > 0) {
+    html += `<tr class="vspacer" style="height:${topH}px"><td colspan="${colCount}" style="padding:0;border:0"></td></tr>`;
+  }
+  for (let i = start; i < end; i++) html += rowHtml(tab, display[i], groups);
+  if (botH > 0) {
+    html += `<tr class="vspacer" style="height:${botH}px"><td colspan="${colCount}" style="padding:0;border:0"></td></tr>`;
+  }
+  return html;
+}
+
+/** Slice [start, end) de `display` que cobre a area visivel de `wrap`, com
+ *  uma folga de VIRTUALIZE_BUFFER linhas de cada lado para a rolagem nao
+ *  mostrar espaco em branco antes do proximo redesenho. */
+function virtualRange(total, scrollTop, viewportH) {
+  const visibleCount = Math.ceil(viewportH / ROW_H) + VIRTUALIZE_BUFFER * 2;
+  let start = Math.max(0, Math.floor(scrollTop / ROW_H) - VIRTUALIZE_BUFFER);
+  start = Math.min(start, Math.max(0, total - visibleCount));
+  const end = Math.min(total, start + visibleCount);
+  return { start, end };
+}
+
+/** Reconcilia o <tbody> virtualizado com a posicao de rolagem atual.
+ *  So reescreve o HTML quando o slice necessario muda — senao cada pixel
+ *  rolado dispararia uma escrita no DOM. */
+function updateVirtualSlice(wrap, tab) {
+  if (!wrap || wrap.dataset.virtual !== "1" || !wrap._display) return;
+  const tbody = wrap.querySelector("tbody");
+  if (!tbody) return;
+  const total = wrap._display.length;
+  const viewportH = wrap.clientHeight || 700;
+  const { start, end } = virtualRange(total, wrap.scrollTop, viewportH);
+  if (start === wrap._vStart && end === wrap._vEnd) return;
+  wrap._vStart = start;
+  wrap._vEnd = end;
+  tbody.innerHTML = renderVirtualRows(wrap._display, wrap._groups, tab, start, end, total, wrap._colCount);
+}
+
 function isHighlighted(tab, line) {
   const c = line.c;
   if (!c) return false;
@@ -1263,12 +1347,28 @@ function buildPanel(tab, paneIndex) {
   } else if (!shown.length) {
     wrap.innerHTML = `<div class="empty-state">Nenhuma linha para exibir${tab.lines.length ? " com os filtros atuais" : ""}.</div>`;
   } else {
-    const groups = groupTraces(shown);
+    const { display, groups } = displayRows(shown, tab);
+    const virtual = !tab.wrapText && display.length > VIRTUALIZE_THRESHOLD;
+    const colCount = COLUMNS.filter((c) => c.key !== "file").length + 1;
+    let tbodyHtml;
+    if (virtual) {
+      // Altura real do painel so existe depois de anexado ao DOM; ate la um
+      // palpite generoso evita renderizar de menos no primeiro paint (o
+      // ResizeObserver em wirePanel corrige assim que o layout roda).
+      const { start, end } = virtualRange(display.length, 0, 900);
+      wrap._display = display;
+      wrap._groups = groups;
+      wrap._colCount = colCount;
+      wrap._vStart = start;
+      wrap._vEnd = end;
+      tbodyHtml = renderVirtualRows(display, groups, tab, start, end, display.length, colCount);
+    } else {
+      tbodyHtml = display.map((l) => rowHtml(tab, l, groups)).join("");
+    }
+    wrap.dataset.virtual = virtual ? "1" : "";
     wrap.innerHTML =
       `<table class="log-table${tab.wrapText ? " wrap" : ""}">` +
-      tableHeadHtml(false) + "<tbody>" +
-      shown.map((l) => rowHtml(tab, l, groups)).join("") +
-      "</tbody></table>";
+      tableHeadHtml(false) + "<tbody>" + tbodyHtml + "</tbody></table>";
   }
   panel.appendChild(wrap);
   const dock = buildFindDock(tab);
@@ -2029,6 +2129,20 @@ function wirePanel(tab, panel, toolbar, wrap, shown, paneIndex) {
 
   wireColumnResize(panel);
 
+  if (wrap.dataset.virtual === "1") {
+    // O primeiro render usa um palpite de altura (o painel ainda nao tem
+    // layout); assim que o navegador calcular o tamanho de verdade (e a
+    // cada resize depois disso), reconcilia o slice visivel.
+    const ro = new ResizeObserver(() => updateVirtualSlice(wrap, tab));
+    ro.observe(wrap);
+    let scrollPending = false;
+    wrap.addEventListener("scroll", () => {
+      if (scrollPending) return;
+      scrollPending = true;
+      requestAnimationFrame(() => { scrollPending = false; updateVirtualSlice(wrap, tab); });
+    });
+  }
+
   const tbody = wrap.querySelector("tbody");
   if (!tbody) return;
 
@@ -2146,6 +2260,7 @@ function refreshPanel(tab) {
       // fecharia o menu de contexto que acabou de ser aberto sobre a linha.
       suppressScrollHide = true;
       wrap.scrollTop = scrollTop;
+      updateVirtualSlice(wrap, tab);
       setTimeout(() => { suppressScrollHide = false; }, 0);
     }
     if (wasFocused) {
