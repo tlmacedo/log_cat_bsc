@@ -5,7 +5,7 @@ from .fsops import sniff_is_text
 from .logline import detect_format, parse_lines
 
 DEFAULT_LIMIT = 500
-MAX_LIMIT = 20000
+MAX_LIMIT = 200000
 TAIL_CHUNK_SIZE = 65536
 COUNT_CHUNK_SIZE = 4 * 1024 * 1024
 
