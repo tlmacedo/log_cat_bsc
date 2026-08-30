@@ -5,7 +5,7 @@ import re
 from flask import Blueprint, jsonify, request
 
 from . import analysis, deviceinfo, devices, glossary
-from .fsops import PathError, list_tree, resolve_within_root
+from .fsops import PathError, browse, list_tree, resolve_within_root
 from .logline import scan_fields
 from .reader import cached_format, columns_for, count_lines, detect_encoding, read_file
 from .search import RegexError, gather_folder_files, search_files
@@ -247,6 +247,27 @@ def get_filtered():
     result["path"] = rel_path
     result["format"] = log_format
     result["total_lines"] = count_lines(full_path)
+    return jsonify(result)
+
+
+@api.get("/browse")
+def get_browse():
+    """Lista as subpastas de um caminho, para o seletor de pasta."""
+    try:
+        result = browse(request.args.get("path") or None)
+    except PathError as e:
+        return jsonify({"error": str(e)}), 400
+
+    # Atalhos para os lugares que fazem sentido comecar.
+    shortcuts = []
+    for label, target in (
+        ("Pasta de logs", os.environ.get("LOG_ROOT")),
+        ("Capturas USB", devices.DEFAULT_CAPTURE_ROOT),
+        ("Minha pasta", os.path.expanduser("~")),
+    ):
+        if target and os.path.isdir(target):
+            shortcuts.append({"label": label, "path": os.path.realpath(target)})
+    result["shortcuts"] = shortcuts
     return jsonify(result)
 
 

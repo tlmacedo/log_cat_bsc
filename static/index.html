@@ -9,6 +9,7 @@
 <body>
   <div id="topbar">
     <input id="rootInput" placeholder="Caminho da pasta de logs, ex: /Seu_Path/log_cat_bsc/log">
+    <button id="browseBtn" title="Procurar a pasta com os logs">&#128193; Procurar...</button>
     <button id="loadBtn">Carregar pasta</button>
     <span id="rootDevice" class="root-device" hidden></span>
     <span id="status"></span>
@@ -123,6 +124,31 @@
       </header>
       <div id="msgMeta" class="dialog-meta"></div>
       <pre id="msgBody" class="dialog-body"></pre>
+    </div>
+  </div>
+
+  <!-- Seletor de pasta: quem navega e o servidor, porque e ele que precisa
+       enxergar a pasta para ler os logs -->
+  <div id="browseDialog" class="dialog-backdrop" hidden>
+    <div class="dialog dialog-narrow">
+      <header>
+        <strong>Escolher a pasta com os logs</strong>
+        <button id="browseClose" class="icon-btn">&times;</button>
+      </header>
+      <div class="browse-body">
+        <div id="browseShortcuts" class="browse-shortcuts"></div>
+        <div class="browse-path">
+          <button id="browseUp" title="Subir um nivel">&#8593;</button>
+          <input id="browsePath" spellcheck="false">
+          <button id="browseGo" title="Ir para este caminho">Ir</button>
+        </div>
+        <ul id="browseList" class="browse-list"></ul>
+        <p id="browseInfo" class="browse-info"></p>
+      </div>
+      <footer>
+        <button id="browsePick" class="primary">Usar esta pasta</button>
+        <button id="browseCancel">Cancelar</button>
+      </footer>
     </div>
   </div>
 

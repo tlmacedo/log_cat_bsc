@@ -149,6 +149,89 @@ el("#sidebarResize").addEventListener("mousedown", (e) => {
 });
 
 // ---------------------------------------------------------------------------
+// Seletor de pasta
+// ---------------------------------------------------------------------------
+// Quem navega e o servidor: o navegador nunca revela o caminho real de uma
+// pasta escolhida pelo usuario, e e o servidor que precisa enxerga-la para ler
+// os logs. Dentro do container isso mostra exatamente o que foi montado.
+
+const browseDialog = el("#browseDialog");
+let browsePathAtual = "";
+
+el("#browseBtn").addEventListener("click", () => {
+  const atual = el("#rootInput").value.trim();
+  browseDialog.hidden = false;
+  openBrowse(atual || (state.config && state.config.default_root) || "");
+});
+
+const fecharBrowse = () => { browseDialog.hidden = true; };
+el("#browseClose").addEventListener("click", fecharBrowse);
+el("#browseCancel").addEventListener("click", fecharBrowse);
+browseDialog.addEventListener("click", (e) => { if (e.target === browseDialog) fecharBrowse(); });
+
+el("#browseUp").addEventListener("click", () => {
+  if (browseParent) openBrowse(browseParent);
+});
+el("#browseGo").addEventListener("click", () => openBrowse(el("#browsePath").value.trim()));
+el("#browsePath").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") openBrowse(el("#browsePath").value.trim());
+});
+el("#browsePick").addEventListener("click", () => {
+  if (!browsePathAtual) return;
+  fecharBrowse();
+  el("#rootInput").value = browsePathAtual;
+  loadRoot();
+});
+
+let browseParent = null;
+
+async function openBrowse(path) {
+  const lista = el("#browseList");
+  lista.innerHTML = '<li class="browse-empty">Carregando...</li>';
+  try {
+    const params = path ? `?path=${encodeURIComponent(path)}` : "";
+    const res = await fetch(`/api/browse${params}`);
+    const data = await res.json();
+    if (!res.ok) {
+      lista.innerHTML = `<li class="browse-empty browse-err">${escapeHtml(data.error)}</li>`;
+      return;
+    }
+    browsePathAtual = data.path;
+    browseParent = data.parent;
+    el("#browsePath").value = data.path;
+    el("#browseUp").disabled = !data.parent;
+
+    lista.innerHTML = data.dirs.length
+      ? data.dirs.map((d) =>
+          `<li class="browse-dir" data-path="${escapeHtml(d.path)}">` +
+          `\u{1F4C1} ${escapeHtml(d.name)}</li>`).join("") +
+        (data.truncated ? '<li class="browse-empty">(lista truncada)</li>' : "")
+      : '<li class="browse-empty">Nenhuma subpasta aqui.</li>';
+
+    // O numero de arquivos ajuda a reconhecer a pasta certa sem entrar nela.
+    el("#browseInfo").textContent = data.files
+      ? `${fmtNum(data.files)} arquivo(s) nesta pasta` +
+        (data.dirs.length ? ` e ${data.dirs.length} subpasta(s)` : "")
+      : `${data.dirs.length} subpasta(s), nenhum arquivo solto aqui`;
+
+    lista.querySelectorAll(".browse-dir").forEach((li) => {
+      li.addEventListener("click", () => openBrowse(li.dataset.path));
+    });
+
+    if (data.shortcuts) {
+      el("#browseShortcuts").innerHTML = data.shortcuts.map((s) =>
+        `<button class="browse-shortcut" data-path="${escapeHtml(s.path)}" ` +
+        `title="${escapeHtml(s.path)}">${escapeHtml(s.label)}</button>`).join("");
+      el("#browseShortcuts").querySelectorAll(".browse-shortcut").forEach((btn) => {
+        btn.addEventListener("click", () => openBrowse(btn.dataset.path));
+      });
+    }
+  } catch (err) {
+    lista.innerHTML = `<li class="browse-empty browse-err">Falha: ${escapeHtml(err)}</li>`;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Arvore de arquivos
 // ---------------------------------------------------------------------------
 
@@ -3435,6 +3518,7 @@ document.addEventListener("keydown", (e) => {
     if (!msgDialog.hidden) { msgDialog.hidden = true; return; }
     if (!filterDialog.hidden) { filterDialog.hidden = true; return; }
     if (!glossaryDialog.hidden) { glossaryDialog.hidden = true; return; }
+    if (!browseDialog.hidden) { browseDialog.hidden = true; return; }
     if (!ctxMenu.hidden) { hideContextMenu(); return; }
     const tab = activeTab();
     if (tab && tab.findOpen) { tab.findOpen = false; refreshPanel(tab); }

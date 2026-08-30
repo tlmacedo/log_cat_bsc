@@ -72,6 +72,46 @@ def sniff_is_text(path, sample_size=4096):
         return False
 
 
+def browse(path=None):
+    """Subpastas de um caminho, para o seletor de pasta da interface.
+
+    O navegador nunca revela o caminho real de uma pasta escolhida pelo
+    usuario, entao quem navega e o servidor: e ele que precisa enxergar a pasta
+    para ler os logs. Dentro do container isso mostra exatamente o que foi
+    montado, que e o que importa."""
+    path = os.path.realpath(os.path.expanduser(path or os.path.expanduser("~")))
+    if not os.path.isdir(path):
+        raise PathError(f"Pasta nao encontrada: {path}")
+    if not os.access(path, os.R_OK):
+        raise PathError(f"Sem permissao de leitura: {path}")
+
+    dirs, files = [], 0
+    try:
+        with os.scandir(path) as it:
+            for entry in it:
+                if entry.name.startswith("."):
+                    continue
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        dirs.append(entry.name)
+                    else:
+                        files += 1
+                except OSError:
+                    continue
+    except OSError as e:
+        raise PathError(f"Nao consegui listar {path}: {e}")
+
+    dirs.sort(key=str.lower)
+    parent = os.path.dirname(path)
+    return {
+        "path": path,
+        "parent": parent if parent != path else None,
+        "dirs": [{"name": d, "path": os.path.join(path, d)} for d in dirs[:2000]],
+        "files": files,
+        "truncated": len(dirs) > 2000,
+    }
+
+
 def list_tree(root):
     real_root = resolve_root(root)
     entries = []
