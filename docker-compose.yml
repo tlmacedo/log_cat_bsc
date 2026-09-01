@@ -11,7 +11,10 @@ services:
       # Capturas de aparelhos USB, gravadas no host para sobreviverem ao container.
       - "${CAPTURE_DIR:-./capturas}:/capturas"
       # Preferencias compartilhadas com a versao desktop (filtros salvos etc.),
-      # gravadas no host para sobreviverem a recriacao do container.
+      # gravadas no host para sobreviverem a recriacao do container. Aponta
+      # pra dentro do repositorio de proposito: saved_filters.json e
+      # versionado no git, entao sincronizar entre maquinas e um git
+      # pull/push (ver .gitignore e logviewer/prefs.py).
       - "${CONFIG_DIR:-./config}:/config"
     environment:
       LOG_ROOT: /logs

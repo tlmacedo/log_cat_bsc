@@ -37,7 +37,7 @@ CONFIG_DIR="$REPO/config"
 mkdir -p "$CONFIG_DIR"
 ok "Logs:     $LOG_DIR  (aparece como /logs no app)"
 ok "Capturas: $CAPTURE_DIR"
-ok "Config:   $CONFIG_DIR  (filtros salvos — mesmo arquivo da versao desktop, se rodada neste Mac)"
+ok "Config:   $CONFIG_DIR  (filtros salvos — versionados no git, sincronize com pull/push)"
 
 # Pastas visiveis para o botao "Procurar...". Cada uma e montada com o MESMO
 # caminho de dentro do container, para que o que voce ve no Finder seja o que o

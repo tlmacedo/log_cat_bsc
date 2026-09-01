@@ -4,16 +4,27 @@ contrario do localStorage do navegador, que fica preso a cada origem/webview
 e por isso os filtros salvos apareciam diferentes entre a versao web e a
 versao desktop mesmo apontando pro mesmo servidor.
 
+Isso resolve o compartilhamento DENTRO de uma mesma maquina. Entre maquinas
+diferentes (o Mac do usuario e o PC Windows dele, por exemplo) cada uma tem o
+seu proprio processo Python, entao cada uma escreveria no seu proprio arquivo.
+Para os filtros salvos — que sao so nome/consulta, nao caminhos de disco —
+isso e resolvido guardando o arquivo dentro do repositorio git
+(CONFIG_ROOT default = <repo>/config), versionado; sincronizar entre maquinas
+vira um git pull/push normal. Atalhos de pasta/arquivo e a lista de caminhos
+escondidos continuam de fora do git (config/.gitignore) porque sao caminhos
+absolutos que so fazem sentido na maquina onde foram criados.
+
 Guardado em arquivos JSON simples: nao ha usuarios/contas no app, e o volume
-de dados (filtros, atalhos de pasta/arquivo, uma lista de caminhos escondidos)
-e pequeno.
+de dados e pequeno.
 """
 
 import json
 import os
 import tempfile
 
-CONFIG_ROOT = os.environ.get("CONFIG_ROOT") or os.path.expanduser("~/.logviewer")
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+CONFIG_ROOT = os.environ.get("CONFIG_ROOT") or os.path.join(_REPO_ROOT, "config")
 SAVED_FILTERS_PATH = os.path.join(CONFIG_ROOT, "saved_filters.json")
 PROJECT_ENTRIES_PATH = os.path.join(CONFIG_ROOT, "project_entries.json")
 HIDDEN_PATHS_PATH = os.path.join(CONFIG_ROOT, "hidden_paths.json")
