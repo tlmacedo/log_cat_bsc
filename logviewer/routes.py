@@ -290,7 +290,9 @@ def get_saved_filters():
     """Filtros salvos, compartilhados entre TODAS as distribuicoes (web, Mac,
     Windows): ficam num arquivo no backend, nao no localStorage do navegador
     (que e proprio de cada origem/webview e por isso nao seria o mesmo entre
-    a versao web e a versao desktop, mesmo conversando com o mesmo servidor)."""
+    a versao web e a versao desktop, mesmo conversando com o mesmo servidor).
+    O arquivo (config/saved_filters.json) e versionado no git, entao a mesma
+    lista tambem chega em outra maquina via git pull/push — ver prefs.py."""
     return jsonify({"filters": prefs.load_saved_filters()})
 
 

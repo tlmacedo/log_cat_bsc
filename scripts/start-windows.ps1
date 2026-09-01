@@ -40,7 +40,7 @@ $ConfigDir = Join-Path $Repo "config"
 if (-not (Test-Path $ConfigDir)) { New-Item -ItemType Directory -Path $ConfigDir -Force | Out-Null }
 Ok "Logs:     $LogDir  (aparece como /logs no app)"
 Ok "Capturas: $CaptureDir"
-Ok "Config:   $ConfigDir  (filtros salvos - mesmo arquivo da versao desktop, se rodada nesta maquina)"
+Ok "Config:   $ConfigDir  (filtros salvos - versionados no git, sincronize com pull/push)"
 
 # Pastas do host visiveis no botao "Procurar...". No Windows o caminho nao pode
 # ser reproduzido igual (C:\ nao existe no Linux do container), entao cada

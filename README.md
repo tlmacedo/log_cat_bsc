@@ -41,6 +41,15 @@ Para parar: `docker compose down` (ou `./scripts/stop.sh`).
 | a mesma pasta, no caminho original | o mesmo caminho | para o botao **Procurar...** |
 | a sua pasta de usuario | o mesmo caminho | somente leitura |
 | `capturas/` no repositorio | `/capturas` | capturas de aparelhos USB |
+| `config/saved_filters.json` no repositorio | `/config/saved_filters.json` | filtros salvos, **versionado no git** |
+
+Os filtros salvos ficam em `config/saved_filters.json`, dentro do repositorio.
+E o unico jeito de ter os mesmos filtros no Mac, no Windows e na web sem um
+servidor central: sincronize com `git pull`/`git push` de cada maquina, como
+qualquer outro arquivo do repositorio. Os demais atalhos de pasta/arquivo e a
+lista de caminhos escondidos (`config/project_entries.json`,
+`config/hidden_paths.json`) ficam de fora do git porque guardam caminhos
+absolutos do disco, que so fazem sentido na propria maquina.
 
 O botao **Procurar...** navega pelas pastas que o servidor enxerga. Como a sua
 pasta de logs e a sua pasta de usuario sao montadas com o **mesmo caminho**, o

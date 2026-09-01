@@ -12,9 +12,13 @@ __pycache__/
 /capturas/
 /.env
 
-# Preferencias compartilhadas (filtros salvos) quando rodado local sem
-# Docker: cada maquina/checkout tem o seu.
-/config/
+# Preferencias locais por maquina: atalhos de pasta/arquivo e caminhos
+# escondidos referenciam caminhos absolutos do disco, entao nao fazem sentido
+# versionados. saved_filters.json e a excecao abaixo — filtros sao so
+# nome/consulta, entao ficam no git para sincronizar entre Mac, Windows e web
+# via git pull/push.
+/config/*
+!/config/saved_filters.json
 
 # Override gerado pelos scripts com as pastas visiveis do host.
 /docker-compose.override.yml
